@@ -1,0 +1,32 @@
+# Fabrique et teste Adresses Outlook pour Mac sur un Mac de GitHub, à chaque
+# modification de la version Mac. L'app prête à double-cliquer est dans les
+# « artifacts » de la construction : « Adresses Outlook pour Mac ».
+name: App Mac
+
+on:
+  push:
+    paths: ["mac/**", ".github/workflows/mac.yml"]
+  workflow_dispatch:
+
+jobs:
+  mac:
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Construire l'app
+        run: bash mac/natif/construire.sh dist
+      - name: La lancer et la tester sur ce Mac
+        run: bash mac/natif/tester.sh dist
+      - name: Garder l'app
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Adresses Outlook pour Mac
+          path: dist/Adresses Outlook pour Mac.zip
+      - name: Garder les résultats des tests
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests
+          path: dist/tests

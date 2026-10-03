@@ -1,0 +1,5 @@
+# La version Mac est lue par bash et macOS : fins de ligne Unix.
+mac/** text=auto eol=lf
+.github/** text eol=lf
+*.icns binary
+*.png binary

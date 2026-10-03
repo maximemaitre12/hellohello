@@ -3,9 +3,10 @@
 # Ouvre un nouveau message dans le nouvel Outlook, tape les lettres de A à Z
 # dans le champ « À » et note toutes les adresses que propose la liste de
 # suggestions. Là où la liste est pleine, des adresses restent cachées : la
-# recherche est approfondie d'une lettre (a devient aa, ab...), jusqu'à la
-# profondeur et au nombre de recherches réglés. Le résultat va dans un fichier
-# texte et/ou CSV.
+# recherche est approfondie (a devient aa, ab..., martin devient martin j...),
+# jusqu'à ce qu'il n'y ait plus rien à trouver. Chaque adresse est écrite dans
+# le fichier texte et/ou CSV dès qu'elle est trouvée, et un passage interrompu
+# reprend là où il s'était arrêté.
 #
 # Rien n'est jamais envoyé. Le brouillon reste ouvert, champ « À » vide.
 #
@@ -44,12 +45,19 @@ public class Fen {
 #   rendement attendu, sur tout l'alphabet à la fois : combien d'adresses
 #   inconnues la liste devrait montrer. Le calcul s'appuie sur les suites de
 #   lettres réellement vues dans les noms (« qi » existe chez vous, « qx »
-#   non), et retire les adresses déjà notées qui occuperaient la liste.
+#   non), et retire les adresses déjà notées qui occuperaient la liste. Il
+#   apprend en route ce que chaque genre de piste rapporte vraiment en
+#   adresses nouvelles, ce qui écarte vite les recherches vides.
+# - Pas de profondeur maximale : on creuse tant que la liste est pleine.
+# - Un nom trop courant (martin, wang, jean) n'est pas départagé par une
+#   lettre de plus. Quand les lettres ne rapportent plus, un deuxième mot
+#   prend le relais (« martin j », « martin s »).
 # - Le passage s'arrête seul quand il n'y a plus de piste rentable, ou quand
 #   une longue série de recherches n'a plus rien apporté.
 #
-# Testé hors Outlook par outils\tests\simulation-adresses.ps1, qui extrait ce
-# bloc tel quel.
+# Testé hors Outlook par outils\tests\courbe.ps1 (adresses trouvées au fil des
+# recherches, sur des carnets simulés de 400 à 40 000 contacts) et
+# outils\tests\simulation-adresses.ps1, qui extraient ce bloc tel quel.
 $PlanifSource = @'
 using System;
 using System.Collections.Generic;
@@ -57,39 +65,61 @@ using System.Globalization;
 using System.Text;
 
 public class Planif {
-  class Node { public string Q; public string Parent; public int Depth; public double Est, EstRaw; public int Kind; }
-  class Seen { public int Count; public double Novelty; public double Est; public bool Root, Virtual; public string Last; }
+  // Une recherche tapée, ou seulement envisagée.
+  class Node {
+    public List<Node> Kids;
+    public string Q; public string[] Words; public Node Parent; public int Depth; public bool Split, Root;
+    public double Est, EstRaw, Exact = 1.0, Stale, ExpNew; public int Kind;
+    public bool Answered, Virtual; public int Count; public double Novelty;
+    public int KCount, KSeen;
+  }
 
-  public int Cap = 0, MaxDepth, Budget, Done = 0, SinceNew = 0, Pending = 0, Saturation;
+  public int Cap = 0, MaxDepth, Budget, Done = 0, SinceNew = 0, Pending = 0, Saturation = 60;
   public string StopReason = "";
+  public const double MinScore = 0.1;
 
-  string rawPrefix, lastPrefix;
-  string[] fixedWords;
   Queue<Node> roots = new Queue<Node>();
-  List<Node> cands = new List<Node>();
+  Heap heap = new Heap();
+  // Pistes qui ne valent presque rien pour l'instant : revues de loin en loin seulement.
+  List<Node> cold = new List<Node>();
+  const double Cold = 0.01;
   Dictionary<string, Node> nodes = new Dictionary<string, Node>();
-  Dictionary<string, Seen> seen = new Dictionary<string, Seen>();
+  // Pistes à un seul mot libre, par ce mot : pour savoir lesquelles passent le plafond de connus.
+  Dictionary<string, Node> byWord = new Dictionary<string, Node>();
+  List<Node> promote = new List<Node>();
+  string[] fixedWords = new string[0];
   HashSet<string> mails = new HashSet<string>();
-  Dictionary<string, int> known = new Dictionary<string, int>();
-  // Suites de lettres vues : [précédente, suivante], 26 = début de mot.
+  List<string[]> contacts = new List<string[]>();
+  Dictionary<string, List<int>> index = new Dictionary<string, List<int>>();
   double[,] big = new double[27, 26]; double[] bigRow = new double[27];
   double[,] start = new double[26, 26]; double[] startRow = new double[26];
-  // Calibrage : taille de liste prévue et réellement affichée, par profondeur
-  // et selon que la suite de lettres a déjà été vue ou non.
-  double[] predicted = new double[8], obtained = new double[8];
+  double[] predicted = new double[12], obtained = new double[12];
+  double[] predNew = new double[12], obtNew = new double[12];
+  int lastRebuild = 0, lastDeep = 0;
+  // Les recherches à deux mots ne viennent qu'une fois les lettres épuisées.
+  bool splitPhase = false;
+  // Branches qui viennent de rapporter : leurs suites sont à revoir à la hausse.
+  List<Node> bump = new List<Node>();
 
+  public Planif(string prefix) : this(prefix, 12, int.MaxValue) { }
   public Planif(string prefix, int maxDepth, int budget) {
-    rawPrefix = prefix ?? "";
-    string np = Norm(rawPrefix);
-    int sp = np.LastIndexOf(' ');
-    lastPrefix = np.Substring(sp + 1);
-    fixedWords = sp < 0 ? new string[0] : np.Substring(0, sp).Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
     MaxDepth = maxDepth; Budget = budget;
-    Saturation = Math.Max(40, budget / 6);
+    List<string> fw = Tokens(prefix);
+    if (fw.Count > 0 && !(prefix ?? "").EndsWith(" ")) fw.RemoveAt(fw.Count - 1);
+    fixedWords = fw.ToArray();
     for (char c = 'a'; c <= 'z'; c++) {
-      Node n = new Node { Q = rawPrefix + c, Parent = null, Depth = 1, Est = 0 };
-      nodes[n.Q] = n; roots.Enqueue(n);
+      Node n = Make((prefix ?? "") + c, null, false);
+      n.Root = true;
+      roots.Enqueue(n);
     }
+  }
+
+  Node Make(string q, Node parent, bool split) {
+    Node n = new Node { Q = q, Words = Tokens(q).ToArray(), Parent = parent, Split = split, Depth = parent == null ? 1 : parent.Depth + 1 };
+    nodes[q] = n;
+    if (n.Words.Length > 1) { n.KCount = Known(n.Words); n.KSeen = contacts.Count; }
+    if (!split && (parent == null || !parent.Split)) byWord[n.Words[n.Words.Length - 1]] = n;
+    return n;
   }
 
   public static string Norm(string s) {
@@ -110,11 +140,8 @@ public class Planif {
     return t;
   }
 
-  // Le contact correspond-il à la recherche, à la façon d'Outlook ? Chaque mot
-  // de la recherche doit commencer un mot du nom ou de l'adresse.
-  public static bool Matches(string text, string query) {
-    List<string> toks = Tokens(text);
-    foreach (string qw in Tokens(query)) {
+  static bool MatchToks(IList<string> toks, IList<string> words) {
+    foreach (string qw in words) {
       bool ok = false;
       foreach (string t in toks) if (t.StartsWith(qw, StringComparison.Ordinal)) { ok = true; break; }
       if (!ok) return false;
@@ -122,19 +149,42 @@ public class Planif {
     return true;
   }
 
-  static string LastWord(string q) { string n = Norm(q); return n.Substring(n.LastIndexOf(' ') + 1); }
-  int Known(string lw) { int k; return known.TryGetValue(lw, out k) ? k : 0; }
+  // Le contact correspond-il à la recherche, à la façon d'Outlook ? Chaque mot
+  // de la recherche doit commencer un mot du nom ou de l'adresse.
+  public static bool Matches(string text, string query) { return MatchToks(Tokens(text), Tokens(query)); }
+
+  // Contacts déjà connus qui répondent à ces mots.
+  int Known(string[] words) {
+    if (words.Length == 0) return contacts.Count;
+    List<int> best = null;
+    foreach (string w in words) {
+      List<int> l;
+      if (!index.TryGetValue(w, out l)) return 0;
+      if (best == null || l.Count < best.Count) best = l;
+    }
+    if (words.Length == 1) return best.Count;
+    int k = 0;
+    foreach (int i in best) if (MatchToks(contacts[i], words)) k++;
+    return k;
+  }
+
+  // Même chose pour une piste, en ne regardant que les contacts appris depuis
+  // la dernière fois (les numéros de contact ne font que croître).
+  int Known(Node n) {
+    if (n.Words.Length == 1) return Known(n.Words);
+    // Si l'index d'un de ses mots est plus court que ce qui reste à lire, on recompte par lui.
+    int smallest = int.MaxValue;
+    foreach (string w in n.Words) { List<int> l; smallest = Math.Min(smallest, index.TryGetValue(w, out l) ? l.Count : 0); }
+    if (smallest < contacts.Count - n.KSeen) { n.KCount = Known(n.Words); n.KSeen = contacts.Count; return n.KCount; }
+    for (; n.KSeen < contacts.Count; n.KSeen++) if (MatchToks(contacts[n.KSeen], n.Words)) n.KCount++;
+    return n.KCount;
+  }
 
   void Learn(string name, string mail) {
     List<string> toks = Tokens(name + " " + mail);
+    int id = contacts.Count;
+    contacts.Add(toks.ToArray());
     HashSet<string> prefixes = new HashSet<string>();
-    bool inScope = true;
-    foreach (string fw in fixedWords) {
-      bool ok = false;
-      foreach (string t in toks) if (t.StartsWith(fw, StringComparison.Ordinal)) { ok = true; break; }
-      if (!ok) { inScope = false; break; }
-    }
-    int maxLen = lastPrefix.Length + MaxDepth + 1;
     foreach (string t in toks) {
       int prev = 26;
       for (int i = 0; i < t.Length; i++) {
@@ -144,9 +194,19 @@ public class Planif {
         if (i == 1 && prev >= 0 && prev < 26) { start[prev, c]++; startRow[prev]++; }
         prev = c;
       }
-      if (inScope) for (int l = 1; l <= Math.Min(t.Length, maxLen); l++) prefixes.Add(t.Substring(0, l));
+      for (int l = 1; l <= t.Length; l++) prefixes.Add(t.Substring(0, l));
     }
-    foreach (string p in prefixes) known[p] = Known(p) + 1;
+    bool inScope = MatchToks(toks, fixedWords);
+    foreach (string p in prefixes) {
+      List<int> li;
+      if (!index.TryGetValue(p, out li)) index[p] = li = new List<int>();
+      li.Add(id);
+      Node n;
+      if (!inScope || !byWord.TryGetValue(p, out n)) continue;
+      if (Cap >= 3 && !n.Answered && n.Parent != null && Known(n) == Cap) promote.Add(n);
+      // Une branche qui rapporte rend ses suites plus prometteuses.
+      if (n.Kids != null) bump.Add(n);
+    }
   }
 
   // Probabilité qu'un mot qui commence par lw[..-1] continue par sa dernière lettre.
@@ -158,108 +218,180 @@ public class Planif {
     double g = (big[p, c] + 0.2) / (bigRow[p] + 5.2);
     if (lw.Length != 2) return g;
     // Deuxième lettre d'un mot : soit la suite d'un prénom ou d'un nom, soit
-    // une initiale collée au nom (gpoirel, tmaitre), dont la deuxième lettre
-    // suit alors la répartition des débuts de noms.
+    // une initiale collée au nom (gpoirel, tmaitre).
     double s = (start[p, c] + 0.2) / (startRow[p] + 5.2);
     double initial = (big[26, c] + 0.2) / (bigRow[26] + 5.2);
     return 0.45 * s + 0.35 * initial + 0.2 * g;
   }
 
-  // Liste pleine : Outlook cache des contacts sous cette recherche. Un nœud
-  // virtuel est plein par construction (voir Next).
-  bool Full(Seen s) { return s.Virtual || (s.Count >= 3 && s.Count >= Cap); }
+  bool Full(Node s) { return s.Virtual || (s.Answered && s.Count >= 3 && s.Count >= Cap); }
 
-  // Nombre estimé de contacts sous une recherche pleine. On n'en voit que le
-  // plafond ; on suppose au moins le double de ce qu'on en connaît déjà.
-  double TotalEst(Seen s) {
+  double TotalEst(Node s) {
     if (!Full(s)) return s.Count;
     double floor = s.Root ? Cap * 6.0 : Cap * 2.0;
-    return Math.Max(floor, Math.Max(Known(s.Last) * 2.0, s.Est));
+    return Math.Max(floor, Math.Max(Known(s) * 2.0, s.Est));
   }
+
+  double Calibration(int kind) { return (obtained[kind] + 3.0) / (predicted[kind] + 3.0); }
+  // Rendement réel en adresses nouvelles, sur rendement prévu, par genre de
+  // piste. Une liste pleine de contacts déjà connus est longue mais n'apporte
+  // rien : c'est ce facteur qui l'apprend.
+  double Yield(int kind) { return (obtNew[kind] + 2.0) / (predNew[kind] + 2.0); }
 
   // Adresses inconnues que la liste de n devrait montrer, pondérées par ce que
-  // la branche a rapporté jusqu'ici.
+  // la branche a rapporté jusqu'ici. Une recherche dont on connaît déjà de quoi
+  // remplir la liste passe en tête : on ne la tapera pas, on ouvrira ses suites.
   double Score(Node n) {
-    Seen p = seen[n.Parent];
+    Node p = n.Parent;
     if (!Full(p)) return 0;
-    string lw = LastWord(n.Q);
-    int k = Known(lw);
-    // Part des contacts du parent dont un mot continue par cette lettre : ce
-    // qu'on en a vu, complété par la fréquence de cette suite de lettres.
-    double share = (k + 3.0 * Continuation(lw)) / (Known(p.Last) + 3.0);
-    n.Kind = Math.Min(n.Depth, 4) - 1 + (k == 0 ? 4 : 0);
+    int k = Known(n);
+    if (Cap >= 3 && k >= Cap && n.Depth < MaxDepth) return double.MaxValue;
+    string lw = n.Words[n.Words.Length - 1];
+    double share = (k + 3.0 * n.Exact * Continuation(lw)) / (Known(p) + 3.0);
+    n.Kind = n.Split ? 8 + (k == 0 ? 1 : 0) : Math.Min(n.Depth, 4) - 1 + (k == 0 ? 4 : 0);
     n.EstRaw = TotalEst(p) * Math.Min(1.0, share);
-    double est = n.EstRaw * Calibration(n.Kind);
-    n.Est = est;
-    double expNew = Math.Min(Cap, Math.Max(est, k)) - k;
+    n.Est = n.EstRaw * Calibration(n.Kind);
+    double expNew = Math.Min(Cap, Math.Max(n.Est, k)) - k;
     if (expNew <= 0) return 0;
-    return expNew * (0.3 + p.Novelty);
+    n.ExpNew = expNew;
+    return expNew * (0.3 + p.Novelty) * Yield(n.Kind);
   }
 
-  // Taille de liste réelle sur taille prévue pour ce genre de piste. Le modèle
-  // se trompe forcément (chaque carnet a ses habitudes de noms) : il se
-  // corrige au fil du passage. Les deux côtés sont plafonnés comme la liste
-  // d'Outlook, donc seules les pistes mal estimées font bouger le facteur.
-  double Calibration(int kind) { return (obtained[kind] + 3.0) / (predicted[kind] + 3.0); }
+  // Les suites d'une recherche pleine : une lettre de plus au dernier mot, et,
+  // pour ceux qui portent exactement ce mot (martin, wang, jean), qu'aucune
+  // lettre de plus ne départage, un deuxième mot.
+  void Expand(Node p) {
+    if (p.Depth >= MaxDepth) return;
+    string lw = p.Words[p.Words.Length - 1];
+    for (char c = 'a'; c <= 'z'; c++) Push(p.Q + c, p, false, 1.0);
+    double exact = ExactShare(p.Words, lw);
+    if (splitPhase && exact > 0) for (char c = 'a'; c <= 'z'; c++) SplitWord(p, c.ToString(), exact);
+  }
 
-  void Expand(string q, int depth) {
-    if (depth >= MaxDepth) return;
-    for (char c = 'a'; c <= 'z'; c++) {
-      string x = q + c;
-      if (nodes.ContainsKey(x)) continue;
-      Node ch = new Node { Q = x, Parent = q, Depth = depth + 1 };
-      nodes[x] = ch; cands.Add(ch);
+  // Part des contacts connus de la recherche qui n'ont que ce mot exact.
+  double ExactShare(string[] words, string lw) {
+    List<int> l;
+    if (lw.Length < 2 || !index.TryGetValue(lw, out l)) return 0;
+    int all = 0, ex = 0;
+    foreach (int i in l) {
+      if (!MatchToks(contacts[i], words)) continue;
+      all++;
+      bool longer = false, same = false;
+      foreach (string t in contacts[i]) {
+        if (t == lw) same = true;
+        else if (t.StartsWith(lw, StringComparison.Ordinal)) longer = true;
+      }
+      if (same && !longer) ex++;
     }
+    return all == 0 ? 0 : (double)ex / all;
   }
 
-  public const double MinScore = 0.1;
+  // Un nouveau mot qui commence un mot déjà dans la recherche ne trie rien
+  // (« martin ma » répond comme « martin ») : on l'allonge jusqu'à ce qu'il
+  // s'en distingue. Un mot qu'un autre commence déjà est redondant.
+  void SplitWord(Node p, string s, double exact) {
+    foreach (string w in p.Words) {
+      if (w == s || s.StartsWith(w, StringComparison.Ordinal)) return;
+      if (w.StartsWith(s, StringComparison.Ordinal)) {
+        for (char c = 'a'; c <= 'z'; c++) SplitWord(p, s + c, exact);
+        return;
+      }
+    }
+    Push(p.Q + " " + s, p, true, exact);
+  }
 
-  // Pour le banc d'essai : calibrage par genre de piste, et meilleures pistes restantes.
-  public string Diagnostic() {
-    StringBuilder b = new StringBuilder();
-    for (int i = 0; i < 8; i++) b.AppendFormat("kind{0} pred={1:0.0} obt={2:0} cal={3:0.00}{4}", i, predicted[i], obtained[i], Calibration(i), Environment.NewLine);
-    List<KeyValuePair<double, string>> l = new List<KeyValuePair<double, string>>();
-    foreach (Node n in cands) { double sc = Score(n); l.Add(new KeyValuePair<double, string>(sc, n.Q + " k=" + Known(LastWord(n.Q)) + " est=" + n.Est.ToString("0.00") + " raw=" + n.EstRaw.ToString("0.000") + " parentTot=" + TotalEst(seen[n.Parent]).ToString("0") + " parentKnown=" + Known(seen[n.Parent].Last))); }
-    l.Sort((x, y) => y.Key.CompareTo(x.Key));
-    for (int i = 0; i < Math.Min(15, l.Count); i++) b.AppendFormat("{0:0.000} {1}{2}", l[i].Key, l[i].Value, Environment.NewLine);
-    return b.ToString();
+  void Push(string q, Node parent, bool split, double exact) {
+    if (nodes.ContainsKey(q)) return;
+    Node n = Make(q, parent, split);
+    n.Exact = exact;
+    if (parent.Kids == null) parent.Kids = new List<Node>();
+    parent.Kids.Add(n);
+    n.Stale = Score(n);
+    if (n.Stale < Cold) cold.Add(n); else heap.Push(n.Stale, n);
+  }
+
+  // Deuxième temps : les lettres ne rapportent plus. Les noms trop courants
+  // pour être départagés par une lettre de plus le seront par un deuxième mot.
+  void OpenSplits() {
+    splitPhase = true;
+    foreach (Node p in new List<Node>(nodes.Values)) {
+      if (!Full(p) || p.Depth >= MaxDepth) continue;
+      string lw = p.Words[p.Words.Length - 1];
+      double exact = ExactShare(p.Words, lw);
+      if (exact > 0) for (char c = 'a'; c <= 'z'; c++) SplitWord(p, c.ToString(), exact);
+    }
+    lastRebuild = Done;
+  }
+
+  // Les scores ne font en général que baisser (on connaît de plus en plus de
+  // contacts), d'où le tas paresseux. Mais une recherche peut aussi passer le
+  // seuil du plafond de connus, ou profiter d'un recalibrage : on recalcule
+  // tout de temps en temps.
+  void Rebuild(bool deep) {
+    Heap h = new Heap();
+    List<Node> c2 = deep ? new List<Node>() : cold;
+    int pending = 0;
+    IEnumerable<Node> all = heap.Items();
+    if (deep) { List<Node> l = new List<Node>(all); l.AddRange(cold); all = l; }
+    HashSet<Node> once = new HashSet<Node>();
+    foreach (Node n in all) {
+      if (!once.Add(n)) continue;
+      // Parent qui a tout montré, ou piste déjà traitée : elle ne servira plus.
+      if (n.Answered || (n.Parent.Answered && !n.Parent.Virtual && !Full(n.Parent) && n.Parent.Count < 3)) continue;
+      n.Stale = Score(n);
+      if (n.Stale >= MinScore) pending++;
+      if (n.Stale < Cold) c2.Add(n); else h.Push(n.Stale, n);
+    }
+    heap = h; cold = c2; if (deep) lastDeep = Done; Pending = pending; lastRebuild = Done;
   }
 
   public string Next() {
     if (Done >= Budget) { StopReason = "budget"; return null; }
     if (roots.Count > 0) return roots.Dequeue().Q;
+    Saturation = Math.Max(60, Done / 4);
     if (SinceNew >= Saturation) { StopReason = "saturation"; return null; }
+    if (Done - lastRebuild >= 500) Rebuild(Done - lastDeep >= 3000);
+    foreach (Node pn in promote) if (!pn.Answered) heap.Push(double.MaxValue, pn);
+    promote.Clear();
+    foreach (Node b in bump)
+      foreach (Node kid in b.Kids) {
+        if (kid.Answered) continue;
+        double sc = Score(kid);
+        if (sc > kid.Stale + 1e-9) { kid.Stale = sc; heap.Push(sc, kid); }
+      }
+    bump.Clear();
+    bool rebuilt = false;
     while (true) {
+      if (heap.Count == 0 || heap.TopKey < MinScore) {
+        // Avant de conclure, on s'assure que ce n'est pas un score périmé.
+        // Un recalcul récent compte : sans cela, chaque fin de file en relancerait un.
+        if (rebuilt || Done - lastRebuild < 50) {
+          if (!splitPhase) { OpenSplits(); rebuilt = false; continue; }
+          Pending = 0; StopReason = "epuise"; return null;
+        }
+        Rebuild(Done - lastDeep >= 500); rebuilt = true; continue;
+      }
+      Node n = (Node)heap.Pop();
+      if (n.Answered) continue;
+      double s = Score(n);
+      if (heap.Count > 0 && s < heap.TopKey - 1e-9) { n.Stale = s; heap.Push(s, n); continue; }
+      if (s < MinScore) { n.Stale = s; heap.Push(s, n); continue; }
       // Une recherche dont on connaît déjà de quoi remplir la liste ne
       // montrerait que du connu : on ne la tape pas, on passe à ses suites.
-      List<Node> virt = null;
-      foreach (Node n in cands) {
-        if (Cap >= 3 && n.Depth < MaxDepth && Known(LastWord(n.Q)) >= Cap && Full(seen[n.Parent])) {
-          if (virt == null) virt = new List<Node>();
-          virt.Add(n);
-        }
-      }
-      if (virt != null) {
-        foreach (Node n in virt) {
-          cands.Remove(n);
-          Seen p = seen[n.Parent];
-          Score(n);
-          seen[n.Q] = new Seen { Virtual = true, Est = n.Est, Novelty = p.Novelty, Last = LastWord(n.Q) };
-          Expand(n.Q, n.Depth);
-        }
+      if (s == double.MaxValue) {
+        n.Virtual = true; n.Answered = true; n.Novelty = n.Parent.Novelty;
+        Expand(n);
         continue;
       }
-      Node best = null; double bs = MinScore; int pending = 0;
-      foreach (Node n in cands) {
-        double sc = Score(n);
-        if (sc >= MinScore) pending++;
-        if (sc >= bs) { bs = sc; best = n; }
-      }
-      if (best == null) { Pending = 0; StopReason = "epuise"; return null; }
-      Pending = pending - 1;
-      cands.Remove(best);
-      return best.Q;
+      if (Pending > 0) Pending--;
+      return n.Q;
     }
+  }
+
+  // Remet en file une recherche proposée mais pas tapée.
+  public void Requeue(string q) {
+    Node n;
+    if (nodes.TryGetValue(q, out n) && !n.Answered && n.Parent != null) heap.Push(n.Stale, n);
   }
 
   // Ce qu'Outlook a montré pour q. keep[i] dit si l'adresse passe les filtres.
@@ -273,13 +405,43 @@ public class Planif {
       if (mails.Add(m)) { Learn(names[i], m); newAll++; if (keep[i]) fresh++; }
     }
     SinceNew = fresh > 0 ? 0 : SinceNew + 1;
-    Node node; nodes.TryGetValue(q, out node);
-    int depth = node == null ? 1 : node.Depth;
-    if (node != null && node.Parent != null) { predicted[node.Kind] += Math.Min(Cap, node.EstRaw); obtained[node.Kind] += mailList.Length; }
-    seen[q] = new Seen { Count = mailList.Length, Novelty = (fresh + 0.5) / (mailList.Length + 1.0),
-                         Est = node == null ? 0 : node.Est, Root = node == null || node.Parent == null, Last = LastWord(q) };
-    if (mailList.Length >= 3) Expand(q, depth);
+    Node n;
+    if (!nodes.TryGetValue(q, out n)) { n = Make(q, null, false); n.Root = true; }
+    if (n.Parent != null) {
+      predicted[n.Kind] += Math.Min(Cap, n.EstRaw); obtained[n.Kind] += mailList.Length;
+      predNew[n.Kind] += n.ExpNew; obtNew[n.Kind] += newAll;
+    }
+    n.Answered = true; n.Count = mailList.Length;
+    n.Novelty = (fresh + 0.5) / (mailList.Length + 1.0);
+    if (mailList.Length >= 3) Expand(n);
     return fresh;
+  }
+
+  // Tas binaire, plus grande clé en tête.
+  class Heap {
+    List<double> k = new List<double>(); List<object> v = new List<object>();
+    public int Count { get { return k.Count; } }
+    public double TopKey { get { return k[0]; } }
+    public IEnumerable<Node> Items() { foreach (object o in v) yield return (Node)o; }
+    public void Push(double key, object val) {
+      k.Add(key); v.Add(val);
+      int i = k.Count - 1;
+      while (i > 0) { int p = (i - 1) / 2; if (k[p] >= k[i]) break; Swap(i, p); i = p; }
+    }
+    public object Pop() {
+      object top = v[0]; int last = k.Count - 1;
+      Swap(0, last); k.RemoveAt(last); v.RemoveAt(last);
+      int i = 0;
+      while (true) {
+        int l = 2 * i + 1, r = l + 1, m = i;
+        if (l < k.Count && k[l] > k[m]) m = l;
+        if (r < k.Count && k[r] > k[m]) m = r;
+        if (m == i) break;
+        Swap(i, m); i = m;
+      }
+      return top;
+    }
+    void Swap(int a, int b) { double t = k[a]; k[a] = k[b]; k[b] = t; object o = v[a]; v[a] = v[b]; v[b] = o; }
   }
 }
 '@
@@ -301,9 +463,12 @@ function Default-Config {
     Keep = ""; Exclude = ""; Dedupe = $true
     Speed = "normal"
     Format = "txt"; Folder = [Environment]::GetFolderPath("Desktop"); OpenAtEnd = $false; CopyAtEnd = $false
-    SmartDepth = 3; SmartBudget = 300
   }
 }
+# Journal du passage en cours : chaque recherche et ce qu'elle a montré. Il
+# permet de reprendre un passage interrompu sans retaper ce qui est fait. Il
+# est effacé quand un passage va au bout.
+$resumePath = Join-Path $cfgDir "reprise.jsonl"
 $cfg = Default-Config
 if (Test-Path $cfgPath) {
   try {
@@ -501,7 +666,7 @@ $SpeedInfo = @{
             <StackPanel>
               <Grid>
                 <TextBlock Text="Progression" FontWeight="SemiBold"/>
-                <TextBlock x:Name="Count" Text="0 / 26" Foreground="#5B6A80" HorizontalAlignment="Right"/>
+                <TextBlock x:Name="Count" Text="0 recherche" Foreground="#5B6A80" HorizontalAlignment="Right"/>
               </Grid>
               <UniformGrid x:Name="Chips" Columns="13" Margin="0,12,0,0"/>
               <TextBlock x:Name="Many" Visibility="Collapsed" Margin="0,10,0,0" Foreground="#5B6A80"
@@ -511,6 +676,17 @@ $SpeedInfo = @{
                 <Border x:Name="Fill" Background="#1E4D8C" CornerRadius="3" HorizontalAlignment="Left" Width="0"/>
               </Grid>
             </StackPanel>
+          </Border>
+
+          <Border x:Name="ResumeBox" Visibility="Collapsed" Margin="0,12,0,0" CornerRadius="12" Background="White" BorderBrush="#9FB6D6" BorderThickness="1" Padding="14,10">
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <StackPanel VerticalAlignment="Center">
+                <TextBlock Text="Passage interrompu" FontWeight="SemiBold"/>
+                <TextBlock x:Name="ResumeText" TextWrapping="Wrap" Foreground="#5B6A80" FontSize="12" Margin="0,2,0,0"/>
+              </StackPanel>
+              <Button x:Name="BtnFresh" Grid.Column="1" Style="{StaticResource Secondary}" Content="Repartir de zéro" Margin="10,0,0,0" VerticalAlignment="Center"/>
+            </Grid>
           </Border>
 
           <Grid Margin="0,12,0,0">
@@ -548,26 +724,15 @@ $SpeedInfo = @{
 
             <Border Background="White" CornerRadius="14" BorderBrush="#E6EBF2" BorderThickness="1" Padding="16">
               <StackPanel>
-                <TextBlock Style="{StaticResource SectionTitle}" Text="1. Jusqu'où chercher"/>
-                <StackPanel x:Name="SmartBox">
-                  <Border Background="#F1F6FD" CornerRadius="10" Padding="12,10" Margin="0,0,0,12">
+                <TextBlock Style="{StaticResource SectionTitle}" Text="1. Quoi chercher"/>
+                <Border Background="#F1F6FD" CornerRadius="10" Padding="12,10" Margin="0,0,0,12">
+                  <StackPanel>
+                    <TextBlock TextWrapping="Wrap" Foreground="#1E4D8C" FontSize="12" FontWeight="SemiBold" Margin="0,0,0,4"
+                               Text="Le passage va jusqu'au bout, sans limite de recherches."/>
                     <TextBlock TextWrapping="Wrap" Foreground="#1E4D8C" FontSize="12"
-                               Text="Commence par les 26 lettres. Quand la liste de suggestions est pleine, des adresses restent cachées dessous : la recherche devient une piste à creuser (a devient al, am, an...). Les pistes passent par ordre de rendement, sur tout l'alphabet : d'abord les suites de lettres qui existent vraiment dans vos contacts, et jamais celles qui ne montreraient que des adresses déjà notées. Le passage s'arrête seul quand il n'y a plus rien à gagner."/>
-                  </Border>
-                  <TextBlock Style="{StaticResource Label}" Text="Profondeur maximale" Margin="0,0,0,8"/>
-                  <WrapPanel>
-                    <RadioButton x:Name="SmartD2" GroupName="sdepth" Style="{StaticResource Pill}" Content="2 lettres"/>
-                    <RadioButton x:Name="SmartD3" GroupName="sdepth" Style="{StaticResource Pill}" Content="3 lettres"/>
-                    <RadioButton x:Name="SmartD4" GroupName="sdepth" Style="{StaticResource Pill}" Content="4 lettres"/>
-                  </WrapPanel>
-                  <TextBlock Style="{StaticResource Help}" Margin="0,0,0,12" Text="Plus c'est profond, plus on trouve d'adresses dans les groupes nombreux, et plus c'est long."/>
-                  <TextBlock Style="{StaticResource Label}" Text="Nombre maximum de recherches" Margin="0,0,0,8"/>
-                  <StackPanel Orientation="Horizontal">
-                    <TextBox x:Name="SmartBudget" Style="{StaticResource Input}" Width="110" MaxLength="6" TextAlignment="Right" InputMethod.IsInputMethodEnabled="False"/>
-                    <TextBlock Text="recherches" Foreground="#5B6A80" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                               Text="Il commence par les 26 lettres. Quand la liste de suggestions est pleine, des adresses restent cachées dessous : la recherche devient une piste à creuser (a devient al, am, an...). Les pistes passent par ordre de rendement, sur tout l'alphabet, et un nom trop courant pour être départagé par une lettre l'est par un deuxième mot (martin j, martin s...). Il s'arrête seul quand il n'y a plus rien à trouver. Chaque adresse est enregistrée dès qu'elle est trouvée : vous pouvez arrêter à tout moment, et reprendre plus tard là où vous en étiez."/>
                   </StackPanel>
-                  <TextBlock Style="{StaticResource Help}" Text="Un plafond, pas un objectif : le passage s'arrête souvent avant, dès que les recherches ne rapportent plus. Les adresses trouvées sont toujours gardées."/>
-                </StackPanel>
+                </Border>
 
                 <StackPanel x:Name="PrefixBox">
                   <TextBlock Style="{StaticResource Label}" Text="Préfixe (facultatif)"/>
@@ -647,7 +812,7 @@ $SpeedInfo = @{
           <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
           <TextBlock x:Name="LiveQuery" Text="A" FontSize="28" FontWeight="Bold" Foreground="#1E4D8C" TextTrimming="CharacterEllipsis"/>
           <StackPanel Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Center">
-            <TextBlock x:Name="LiveCount" Text="0 / 26" FontWeight="SemiBold" HorizontalAlignment="Right"/>
+            <TextBlock x:Name="LiveCount" Text="0 recherche" FontWeight="SemiBold" HorizontalAlignment="Right"/>
             <TextBlock x:Name="LiveEta" Text="" Foreground="#5B6A80" FontSize="12" HorizontalAlignment="Right"/>
           </StackPanel>
         </Grid>
@@ -682,8 +847,6 @@ function Wait([int]$ms) { $end = (Get-Date).AddMilliseconds($ms); while ((Get-Da
 
 function Apply-Config {
   $script:loading = $true
-  switch ([int]$cfg.SmartDepth) { 2 { $ui.SmartD2.IsChecked = $true } 4 { $ui.SmartD4.IsChecked = $true } default { $ui.SmartD3.IsChecked = $true } }
-  $ui.SmartBudget.Text = [string][int]$cfg.SmartBudget
   if ($cfg.Source -eq "gmail") { $ui.SrcGmail.IsChecked = $true } else { $ui.SrcOutlook.IsChecked = $true }
   $ui.GmailAccount.Text = $cfg.GmailAccount
   $ui.Prefix.Text = $cfg.Prefix
@@ -696,10 +859,6 @@ function Apply-Config {
 }
 
 function Read-Config {
-  $cfg.SmartDepth = if ($ui.SmartD2.IsChecked) { 2 } elseif ($ui.SmartD4.IsChecked) { 4 } else { 3 }
-  # Le nombre tapé, tel quel. Champ vide ou zéro : on garde le dernier nombre valable.
-  $n = 0
-  if ([int]::TryParse(($ui.SmartBudget.Text -replace '\D', ''), [ref]$n) -and $n -ge 1) { $cfg.SmartBudget = $n }
   $cfg.Source = if ($ui.SrcGmail.IsChecked) { "gmail" } else { "outlook" }
   $cfg.GmailAccount = $ui.GmailAccount.Text.Trim()
   # Une virgule ou un point-virgule ferait valider un destinataire.
@@ -748,9 +907,8 @@ function Update-Summary {
   if ($cfg.Keep) { $filters += "domaines filtrés" }
   if ($cfg.Exclude) { $filters += "exclusions" }
   $ftxt = if ($filters.Count) { " · " + ($filters -join ", ") } else { "" }
-  # La durée dépend de ce qu'Outlook contient : on n'annonce que le plafond.
-  $max = Duration-Text ([int]$cfg.SmartBudget * $SpeedInfo[$cfg.Speed].Sec)
-  $ui.Plan.Text = "$start, puis les pistes les plus rentables jusqu'à $($cfg.SmartDepth) lettres · $($cfg.SmartBudget) recherches au plus$ftxt · $fmt · $max au maximum, souvent bien moins"
+  # La durée dépend de ce que la messagerie contient : on ne la connaît pas d'avance.
+  $ui.Plan.Text = "$start, puis les pistes les plus rentables jusqu'à ce qu'il n'y ait plus rien à trouver$ftxt · $fmt, enregistré au fur et à mesure · de quelques minutes à plusieurs heures selon la taille de votre carnet, arrêt possible à tout moment"
   $ui.SpeedHelp.Text = $SpeedInfo[$cfg.Speed].Text
   Build-Chips $queries
   Save-Config
@@ -773,7 +931,7 @@ function Build-Chips($queries) {
       Chip $q "wait"
     }
   }
-  $ui.Count.Text = "0 / $($queries.Count)"; $ui.Fill.Width = 0
+  $ui.Count.Text = "0 recherche"; $ui.Fill.Width = 0
 }
 
 function Chip([string]$q, [string]$state) {
@@ -787,8 +945,10 @@ function Chip([string]$q, [string]$state) {
   }
 }
 
+# Le nombre de recherches à venir n'est connu qu'à peu près : on affiche celles
+# qui sont faites, et la barre suit l'estimation.
 function Progress([int]$done, [int]$total) {
-  $ui.Count.Text = "$done / $total"; $ui.LiveCount.Text = "$done / $total"
+  $ui.Count.Text = Plural $done "recherche" "recherches"; $ui.LiveCount.Text = $ui.Count.Text
   if ($total -gt 0) {
     $ui.Fill.Width = [Math]::Round(($ui.Fill.Parent.ActualWidth) * $done / $total)
     $ui.LiveFill.Width = [Math]::Round(($ui.LiveFill.Parent.ActualWidth) * $done / $total)
@@ -831,6 +991,9 @@ function Add-Row([string]$q, [string]$mail, [string]$name) {
   $sp.Children.Add($m) | Out-Null; if ($n.Text) { $sp.Children.Add($n) | Out-Null }
   $g.Children.Add($badge) | Out-Null; $g.Children.Add($sp) | Out-Null
   $ui.Rows.Children.Add($g) | Out-Null
+  # Un long passage trouve des milliers d'adresses : l'écran garde les
+  # dernières, le fichier les a toutes. (La première ligne est le texte d'attente.)
+  if ($ui.Rows.Children.Count -gt 301) { $ui.Rows.Children.RemoveAt(1) }
 }
 
 function Reset-Results {
@@ -1035,8 +1198,131 @@ $script:files = @()
 $script:distinctes = @()
 $script:stop = $false
 
-function Passage {
-  Read-Config; Save-Config
+# ------------------------------------------------------ fichiers et reprise
+#
+# Les fichiers de résultats sont écrits au fil du passage : une adresse trouvée
+# est sur le disque aussitôt, même si l'ordinateur s'éteint. Le journal garde
+# chaque recherche et ce qu'elle a montré, une ligne par recherche :
+#   recherche <TAB> nom <US> adresse <US> gardée <RS> nom <US> ...
+# (US et RS sont les caractères de contrôle 31 et 30, absents des noms.) Sa
+# première ligne décrit le passage : réglages et nom des fichiers.
+
+$US = [string][char]31; $RS = [string][char]30
+
+function Txt-Line($r) { "$($r.Query) : $($r.Mail)    ($($r.Name))" }
+function Csv-Line($r) { (Csv-Field $r.Query) + ";" + $r.Rank + ";" + (Csv-Field $r.Name) + ";" + (Csv-Field $r.Mail) }
+
+function New-Writer([string]$path) {
+  $w = New-Object System.IO.StreamWriter($path, $false, (New-Object System.Text.UTF8Encoding $true))
+  $w.AutoFlush = $true
+  return $w
+}
+
+# Ouvre les fichiers de résultats en y réécrivant ce qui est déjà trouvé (une
+# reprise repart ainsi d'un fichier propre), puis les garde ouverts.
+function Open-Outputs([string]$base, $records) {
+  $script:files = @(); $script:txtW = $null; $script:csvW = $null
+  if ($cfg.Format -in "txt", "both") {
+    $script:txtW = New-Writer "$base.txt"
+    foreach ($r in $records) { $script:txtW.WriteLine((Txt-Line $r)) }
+    $script:files += "$base.txt"
+  }
+  if ($cfg.Format -in "csv", "both") {
+    $script:csvW = New-Writer "$base.csv"
+    $script:csvW.WriteLine("Recherche;Rang;Nom;Adresse")
+    foreach ($r in $records) { $script:csvW.WriteLine((Csv-Line $r)) }
+    $script:files += "$base.csv"
+  }
+}
+
+function Write-Record($r) {
+  if ($script:txtW) { $script:txtW.WriteLine((Txt-Line $r)) }
+  if ($script:csvW) { $script:csvW.WriteLine((Csv-Line $r)) }
+}
+
+# Le texte se termine par la liste des adresses distinctes.
+function Close-Outputs {
+  if ($script:txtW) {
+    $script:txtW.WriteLine("")
+    $script:txtW.WriteLine("Adresses distinctes : $($script:distinctes.Count)")
+    foreach ($m in $script:distinctes) { $script:txtW.WriteLine($m) }
+    $script:txtW.Close(); $script:txtW = $null
+  }
+  if ($script:csvW) { $script:csvW.Close(); $script:csvW = $null }
+}
+
+function Elapsed-Text([double]$sec) {
+  $m = [Math]::Floor($sec / 60)
+  if ($m -lt 1) { return "moins d'une minute" }
+  if ($m -lt 60) { return "$m min" }
+  return ("{0} h {1:00}" -f [Math]::Floor($m / 60), ($m % 60))
+}
+
+function Journal-Line([string]$q, $list, $keep) {
+  $parts = for ($i = 0; $i -lt $list.Count; $i++) { $list[$i].Name + $US + $list[$i].Mail + $US + $(if ($keep[$i]) { "1" } else { "0" }) }
+  return $q + "`t" + ($parts -join $RS)
+}
+
+# Le journal du passage interrompu, ou rien. Une dernière ligne coupée (arrêt
+# brutal pendant l'écriture) est ignorée.
+function Read-Journal {
+  if (-not (Test-Path $resumePath)) { return $null }
+  try {
+    $lines = [System.IO.File]::ReadAllLines($resumePath, [System.Text.Encoding]::UTF8)
+    if ($lines.Count -lt 1) { return $null }
+    $head = $lines[0] | ConvertFrom-Json
+    $entries = New-Object System.Collections.Generic.List[object]
+    $kept = @{}
+    for ($i = 1; $i -lt $lines.Count; $i++) {
+      $tab = $lines[$i].IndexOf("`t")
+      if ($tab -lt 0) { continue }
+      $names = @(); $mails = @(); $keeps = @()
+      $rest = $lines[$i].Substring($tab + 1)
+      $ok = $true
+      if ($rest) {
+        foreach ($item in $rest.Split($RS)) {
+          $f = $item.Split($US)
+          if ($f.Count -ne 3) { $ok = $false; break }
+          $names += $f[0]; $mails += $f[1]; $keeps += ($f[2] -eq "1")
+          if ($f[2] -eq "1") { $kept[$f[1]] = 1 }
+        }
+      }
+      if (-not $ok) { break }
+      $entries.Add([pscustomobject]@{ Q = $lines[$i].Substring(0, $tab); Names = $names; Mails = $mails; Keep = $keeps })
+    }
+    return [pscustomobject]@{ Header = $head; Entries = $entries; Kept = $kept.Count }
+  } catch { return $null }
+}
+
+function Clear-Journal { Remove-Item $resumePath -ErrorAction SilentlyContinue }
+
+# Affiche, ou non, la proposition de reprendre.
+function Refresh-Resume {
+  $j = Read-Journal
+  if ($j -and $j.Entries.Count -gt 0) {
+    $when = try { ([datetime]$j.Header.Started).ToString("dd/MM 'à' HH:mm") } catch { "" }
+    $file = Split-Path $j.Header.Base -Leaf
+    $ui.ResumeText.Text = "Commencé le $when : $(Plural $j.Entries.Count "recherche" "recherches"), $(Plural $j.Kept "adresse" "adresses"), dans $file. Reprendre continue là où il s'était arrêté, dans le même fichier, sans retaper ce qui est fait."
+    $ui.ResumeBox.Visibility = "Visible"
+    $ui.BtnRun.Content = "Reprendre le passage"
+  } else {
+    $ui.ResumeBox.Visibility = "Collapsed"
+    $ui.BtnRun.Content = if ($script:hasRun) { "Relancer" } else { "Lancer le passage" }
+  }
+}
+
+function Passage([bool]$resume) {
+  Read-Config
+  $journal = if ($resume) { Read-Journal } else { $null }
+  if ($journal) {
+    # Une reprise se fait avec les réglages du passage commencé, sinon les
+    # recherches ne seraient plus les mêmes.
+    foreach ($k in "Source", "GmailAccount", "Prefix", "Keep", "Exclude", "Dedupe", "Format") {
+      if ($null -ne $journal.Header.$k) { $cfg[$k] = $journal.Header.$k }
+    }
+    Apply-Config; Update-Summary
+  }
+  Save-Config
   $script:hasRun = $true
   $queries = Build-Queries
   $src = Source-Name
@@ -1050,8 +1336,72 @@ function Passage {
   $sp = $SpeedInfo[$cfg.Speed]
   $script:stop = $false
   Reset-Results; Build-Chips $queries
+
+  # Le planificateur choisit chaque recherche : les 26 lettres, puis les
+  # pistes les plus rentables, où qu'elles soient dans l'alphabet.
+  $plan = [Planif]::new([string]$cfg.Prefix)
+  $prefixLen = $cfg.Prefix.Length
+  $chipState = @{}
+  $records = New-Object System.Collections.Generic.List[object]
+  $seen = @{}
+
+  # Ce qu'il faut garder d'une réponse : rend les nouvelles lignes de résultat.
+  $keepFrom = {
+    param($q, $list, $keep)
+    $out = @()
+    for ($i = 0; $i -lt $list.Count; $i++) {
+      if (-not $keep[$i]) { continue }
+      if ($cfg.Dedupe -and $seen.ContainsKey($list[$i].Mail)) { continue }
+      $seen[$list[$i].Mail] = 1
+      $r = [pscustomobject]@{ Query = $q; Rank = $i + 1; Name = $list[$i].Name; Mail = $list[$i].Mail }
+      $records.Add($r); $out += $r
+    }
+    return $out
+  }
+  $markChip = {
+    param($q, $count)
+    $root = $q.Substring(0, [Math]::Min($q.Length, $prefixLen + 1))
+    if ($count -gt 0) { $chipState[$root] = "ok" } elseif (-not $chipState.ContainsKey($root)) { $chipState[$root] = "none" }
+    Chip $root $chipState[$root]
+  }
+
+  # Reprise : on rejoue le journal dans le planificateur, sans rien taper. Il
+  # retrouve exactement l'état où il était, recherche par recherche.
+  $replayed = New-Object System.Collections.Generic.List[string]
+  if ($journal) {
+    $diverged = $false
+    foreach ($e in $journal.Entries) {
+      $list = @(for ($i = 0; $i -lt $e.Mails.Count; $i++) { [pscustomobject]@{ Name = $e.Names[$i]; Mail = $e.Mails[$i] } })
+      $keep = [bool[]]@($e.Keep)
+      $q = if ($diverged) { $null } else { $plan.Next() }
+      if ($q -ne $e.Q) {
+        # Le planificateur a changé depuis : on garde les adresses, pas la
+        # suite, et la recherche qu'il proposait reste à faire.
+        if ($q) { $plan.Requeue($q) }
+        $diverged = $true
+        & $keepFrom $e.Q $list $keep | Out-Null
+        continue
+      }
+      $plan.Report($q, [string[]]@($e.Names), [string[]]@($e.Mails), $keep) | Out-Null
+      & $keepFrom $q $list $keep | Out-Null
+      & $markChip $q $list.Count
+      $replayed.Add((Journal-Line $q $list $keep))
+    }
+    $base = $journal.Header.Base
+    $startedText = [string]$journal.Header.Started
+    $elapsedBefore = [double]$journal.Header.Seconds
+  } else {
+    $folder = if (Test-Path $cfg.Folder) { $cfg.Folder } else { [Environment]::GetFolderPath("Desktop") }
+    $base = Join-Path $folder ("adresses-" + $src.ToLower() + "-" + (Get-Date -Format "yyyy-MM-dd-HHmm"))
+    $startedText = (Get-Date).ToString("o")
+    $elapsedBefore = 0
+  }
+  $foundBefore = $records.Count
+  $show = [Math]::Max(0, $records.Count - 300)
+  for ($i = $show; $i -lt $records.Count; $i++) { Add-Row $records[$i].Query $records[$i].Mail $records[$i].Name }
+
   Compact-Mode $true
-  $ui.LiveEta.Text = Duration-Text ($queries.Count * $sp.Sec)
+  $ui.LiveEta.Text = ""
 
   if ($gmail) {
     $ui.LiveMail.Text = "Ouverture de Gmail"; Pump
@@ -1068,108 +1418,101 @@ function Passage {
     if (-not $pret) { Compact-Mode $false; Notice "Le nouveau message ne s'est pas ouvert avec le curseur dans le champ « À ». Rien n'a été tapé." "warn"; return }
   }
 
-  $records = New-Object System.Collections.Generic.List[object]
-  $seen = @{}
+  # Tout est prêt : les fichiers et le journal s'ouvrent, et restent à jour à
+  # chaque recherche.
+  Open-Outputs $base $records
+  if (-not (Test-Path $cfgDir)) { New-Item -ItemType Directory -Path $cfgDir | Out-Null }
+  $head = [ordered]@{ Started = $startedText; Base = $base; Seconds = [int]$elapsedBefore }
+  foreach ($k in "Source", "GmailAccount", "Prefix", "Keep", "Exclude", "Dedupe", "Format") { $head[$k] = $cfg[$k] }
+  $jw = New-Writer $resumePath
+  $jw.WriteLine(($head | ConvertTo-Json -Compress))
+  foreach ($l in $replayed) { $jw.WriteLine($l) }
+
   $arret = $null
   $prevLen = 0
-  $started = Get-Date
+  $runStart = Get-Date
   $script:prevSig = ""
 
-  # Le planificateur choisit chaque recherche : les 26 lettres, puis les
-  # pistes les plus rentables, où qu'elles soient dans l'alphabet.
-  $budget = [int]$cfg.SmartBudget
-  $plan = New-Object Planif -ArgumentList $cfg.Prefix, ([int]$cfg.SmartDepth), $budget
-  $prefixLen = $cfg.Prefix.Length
-  $chipState = @{}
+  try {
+    while ($true) {
+      if ($script:stop) { $arret = "arrêté à votre demande."; break }
+      $q = $plan.Next()
+      if (-not $q) { break }
+      if (-not (Au-Premier-Plan $p)) { $arret = "$src n'est plus au premier plan (recherche « $q »)."; break }
+      if (-not (Focus-Dans-Champ-A)) { $arret = "le curseur a quitté le champ « À » (recherche « $q »)."; break }
 
-  while ($true) {
-    if ($script:stop) { $arret = "arrêté à votre demande."; break }
-    $q = $plan.Next()
-    if (-not $q) { break }
-    if (-not (Au-Premier-Plan $p)) { $arret = "$src n'est plus au premier plan (recherche « $q »)."; break }
-    if (-not (Focus-Dans-Champ-A)) { $arret = "le curseur a quitté le champ « À » (recherche « $q »)."; break }
+      # Pour les recherches plus longues, c'est la pastille de la lettre de
+      # départ qui s'allume.
+      $root = $q.Substring(0, $prefixLen + 1)
+      Chip $root "now"; $ui.LiveQuery.Text = $q.ToUpper(); $ui.LiveMail.Text = "Recherche en cours"; Pump
+      Taper("{BACKSPACE " + ($prevLen + 2) + "}")
+      Wait 400
+      Taper((Escape-Keys $q))
+      $prevLen = $q.Length
+      Wait $sp.Settle
 
-    # Pour les recherches plus longues, c'est la pastille de la lettre de
-    # départ qui s'allume.
-    $root = $q.Substring(0, $prefixLen + 1)
-    Chip $root "now"; $ui.LiveQuery.Text = $q.ToUpper(); $ui.LiveMail.Text = "Recherche en cours"; Pump
-    Taper("{BACKSPACE " + ($prevLen + 2) + "}")
-    Wait 400
-    Taper((Escape-Keys $q))
-    $prevLen = $q.Length
-    Wait $sp.Settle
+      $list = @(Lire-Reponse $p $q $sp)
+      $keep = [bool[]]@($list | ForEach-Object { Passes-Filters $_.Mail })
+      $plan.Report($q, [string[]]@($list | ForEach-Object { $_.Name }), [string[]]@($list | ForEach-Object { $_.Mail }), $keep) | Out-Null
+      $jw.WriteLine((Journal-Line $q $list $keep))
 
-    $list = @(Lire-Reponse $p $q $sp)
-    $plan.Report($q, [string[]]@($list | ForEach-Object { $_.Name }), [string[]]@($list | ForEach-Object { $_.Mail }),
-                 [bool[]]@($list | ForEach-Object { Passes-Filters $_.Mail })) | Out-Null
+      $new = @(& $keepFrom $q $list $keep)
+      foreach ($r in $new) { Write-Record $r; Add-Row $r.Query $r.Mail $r.Name; $ui.LiveMail.Text = $r.Mail }
+      & $markChip $q $list.Count
+      if ($new.Count -eq 0) { $ui.LiveMail.Text = if ($list.Count -eq 0) { "Aucune suggestion" } else { "Rien de nouveau" } }
 
-    $kept = 0
-    $rank = 0
-    foreach ($s in $list) {
-      $rank++
-      if (-not (Passes-Filters $s.Mail)) { continue }
-      if ($cfg.Dedupe -and $seen.ContainsKey($s.Mail)) { continue }
-      $seen[$s.Mail] = 1
-      $records.Add([pscustomobject]@{ Query = $q; Rank = $rank; Name = $s.Name; Mail = $s.Mail })
-      Add-Row $q $s.Mail $s.Name
-      $ui.LiveMail.Text = $s.Mail
-      $kept++
+      # La fin n'est connue qu'à peu près : la barre suit les pistes encore
+      # rentables, qui se découvrent en route.
+      $done = $plan.Done
+      Progress $done ($done + [Math]::Max($plan.Pending, 26 - $done))
+      $ui.LiveEta.Text = (Elapsed-Text ($elapsedBefore + ((Get-Date) - $runStart).TotalSeconds)) + " · " + (Plural $records.Count "adresse" "adresses")
     }
-    # Jaune seulement si Outlook n'a rien proposé, pas si tout était déjà noté.
-    if ($list.Count -gt 0) { $chipState[$root] = "ok" }
-    elseif (-not $chipState.ContainsKey($root)) { $chipState[$root] = "none" }
-    Chip $root $chipState[$root]
-    if ($kept -eq 0) { $ui.LiveMail.Text = if ($list.Count -eq 0) { "Aucune suggestion" } else { "Rien de nouveau après filtres" } }
-
-    # Ce qui reste n'est connu qu'à peu près : les pistes encore rentables,
-    # dans la limite du nombre de recherches.
-    $done = $plan.Done
-    $total = [Math]::Min($budget, $done + [Math]::Max($plan.Pending, 26 - $done))
-    Progress $done $total
-    $left = ((Get-Date) - $started).TotalSeconds / $done * ($total - $done)
-    $ui.LiveEta.Text = if ($total -gt $done) { "reste environ " + (Duration-Text $left) } else { "" }
+    if (Focus-Dans-Champ-A) { Taper("{BACKSPACE " + ($prevLen + 2) + "}") }
+  } finally {
+    $script:distinctes = @($records | ForEach-Object { $_.Mail } | Sort-Object -Unique)
+    Close-Outputs
+    $jw.Close()
   }
-  if (Focus-Dans-Champ-A) { Taper("{BACKSPACE " + ($prevLen + 2) + "}") }
 
   Compact-Mode $false
   $win.Activate() | Out-Null
 
-  $script:files = @()
-  $script:distinctes = @($records | ForEach-Object { $_.Mail } | Sort-Object -Unique)
+  # La durée écoulée sert à la reprise : on la note en tête du journal.
+  if ($arret) {
+    try {
+      $lines = [System.IO.File]::ReadAllLines($resumePath, [System.Text.Encoding]::UTF8)
+      $head.Seconds = [int]($elapsedBefore + ((Get-Date) - $runStart).TotalSeconds)
+      $lines[0] = $head | ConvertTo-Json -Compress
+      [System.IO.File]::WriteAllLines($resumePath, $lines, (New-Object System.Text.UTF8Encoding $false))
+    } catch { }
+  } else { Clear-Journal }
+
   $ui.Distinct.Text = Plural $script:distinctes.Count "adresse distincte" "adresses distinctes"
   if ($records.Count -gt 0) {
-    $folder = if (Test-Path $cfg.Folder) { $cfg.Folder } else { [Environment]::GetFolderPath("Desktop") }
-    $base = Join-Path $folder ("adresses-" + $src.ToLower() + "-" + (Get-Date -Format "yyyy-MM-dd-HHmm"))
-    if ($cfg.Format -in "txt", "both") {
-      $lines = $records | ForEach-Object { "$($_.Query) : $($_.Mail)    ($($_.Name))" }
-      $contenu = @($lines) + @("", "Adresses distinctes : $($script:distinctes.Count)") + $script:distinctes
-      $contenu | Set-Content -Path "$base.txt" -Encoding UTF8
-      $script:files += "$base.txt"
-    }
-    if ($cfg.Format -in "csv", "both") {
-      $csv = @("Recherche;Rang;Nom;Adresse") + ($records | ForEach-Object { (Csv-Field $_.Query) + ";" + $_.Rank + ";" + (Csv-Field $_.Name) + ";" + (Csv-Field $_.Mail) })
-      $csv | Set-Content -Path "$base.csv" -Encoding UTF8
-      $script:files += "$base.csv"
-    }
     $ui.BtnOpen.IsEnabled = $true; $ui.BtnCopy.IsEnabled = $true
     if ($cfg.CopyAtEnd) { [System.Windows.Clipboard]::SetText(($script:distinctes -join [Environment]::NewLine)) }
     if ($cfg.OpenAtEnd) { Open-Files }
+  } else {
+    # Rien trouvé : pas de fichier vide qui traîne.
+    foreach ($f in $script:files) { Remove-Item $f -ErrorAction SilentlyContinue }
+    $script:files = @()
   }
 
   $names = ($script:files | ForEach-Object { Split-Path $_ -Leaf }) -join " et "
+  $gained = $records.Count - $foundBefore
+  $copied = if ($cfg.CopyAtEnd -and $records.Count -gt 0) { " Adresses copiées." } else { "" }
   if ($arret) {
-    Notice ("Arrêté : $arret Ce qui était fait est gardé" + $(if ($names) { " dans $names." } else { "." })) "warn"
+    Notice ("Arrêté : $arret Tout ce qui a été trouvé est enregistré" + $(if ($names) { " dans $names" } else { "" }) + "." + $copied + " Vous pouvez reprendre le passage plus tard, là où il s'est arrêté.") "warn"
   } elseif ($records.Count -eq 0) {
     Notice "Terminé, mais aucune adresse ne passe vos filtres. Rien n'a été enregistré." "warn"
   } else {
-    $copied = if ($cfg.CopyAtEnd) { " Adresses copiées." } else { "" }
-    $copied += " $($plan.Done) recherches."
-    $copied += switch ($plan.StopReason) {
-      "budget"     { " La limite de $budget recherches a été atteinte alors qu'il restait des pistes : augmentez-la pour aller plus loin." }
+    $more = $copied + " $($plan.Done) recherches."
+    if ($journal) { $more += " Cette reprise a ajouté $(Plural $gained "adresse" "adresses")." }
+    $more += switch ($plan.StopReason) {
       "saturation" { " Arrêt automatique : les $($plan.Saturation) dernières recherches n'apportaient plus d'adresse nouvelle." }
-      default      { " Toutes les pistes rentables ont été explorées." }
+      default      { " Toutes les pistes ont été explorées." }
     }
-    Notice "Terminé : $(Plural $script:distinctes.Count "adresse" "adresses"), enregistrées dans $names.$copied Le brouillon reste ouvert dans $src, champ « À » vide : vous pouvez le fermer$(if ($gmail) { ', et le supprimer des brouillons si Gmail l''y a gardé' })." "ok"
+    Notice "Terminé : $(Plural $script:distinctes.Count "adresse" "adresses"), enregistrées dans $names.$more Le brouillon reste ouvert dans $src, champ « À » vide : vous pouvez le fermer$(if ($gmail) { ', et le supprimer des brouillons si Gmail l''y a gardé' })." "ok"
   }
 }
 
@@ -1189,22 +1532,12 @@ $ui.TabRun.Add_Checked({ $ui.PageRun.Visibility = "Visible"; $ui.PageSet.Visibil
 $ui.TabSet.Add_Checked({ $ui.PageRun.Visibility = "Collapsed"; $ui.PageSet.Visibility = "Visible" })
 $ui.BtnEdit.Add_Click({ $ui.TabSet.IsChecked = $true })
 
-foreach ($n in "SmartD2","SmartD3","SmartD4","SrcOutlook","SrcGmail",
+foreach ($n in "SrcOutlook","SrcGmail",
                "SpeedFast","SpeedNormal","SpeedCareful","FmtTxt","FmtCsv","FmtBoth") {
   $ui[$n].Add_Checked({ Update-Summary })
 }
 foreach ($n in "Dedupe","OpenAtEnd","CopyAtEnd") { $ui[$n].Add_Checked({ Update-Summary }); $ui[$n].Add_Unchecked({ Update-Summary }) }
-foreach ($n in "Prefix","Keep","Exclude","SmartBudget","GmailAccount") { $ui[$n].Add_TextChanged({ Update-Summary }) }
-
-# Le nombre de recherches n'accepte que des chiffres, au clavier comme au collage.
-$ui.SmartBudget.Add_PreviewTextInput({ param($s, $e) if ($e.Text -match '\D') { $e.Handled = $true } })
-[System.Windows.DataObject]::AddPastingHandler($ui.SmartBudget, [System.Windows.DataObjectPastingEventHandler]{
-  param($s, $e)
-  $t = [string]$e.DataObject.GetData([string])
-  if ($t -match '\D') { $e.CancelCommand() }
-})
-# En quittant un champ vide, on réaffiche le nombre retenu.
-$ui.SmartBudget.Add_LostFocus({ $ui.SmartBudget.Text = [string][int]$cfg.SmartBudget })
+foreach ($n in "Prefix","Keep","Exclude","GmailAccount") { $ui[$n].Add_TextChanged({ Update-Summary }) }
 
 $ui.BtnFolder.Add_Click({
   $d = New-Object System.Windows.Forms.FolderBrowserDialog
@@ -1221,8 +1554,15 @@ $ui.BtnReset.Add_Click({
 $ui.BtnRun.Add_Click({
   $ui.TabRun.IsChecked = $true
   $ui.BtnRun.IsEnabled = $false; $ui.BtnOpen.IsEnabled = $false; $ui.BtnCopy.IsEnabled = $false
-  try { Passage } catch { Compact-Mode $false; Notice "Erreur : $($_.Exception.Message)" "warn" }
-  $ui.BtnRun.IsEnabled = $true; $ui.BtnRun.Content = "Relancer"
+  $resume = $ui.ResumeBox.Visibility -eq "Visible"
+  try { Passage $resume } catch { Compact-Mode $false; Notice "Erreur : $($_.Exception.Message)" "warn" }
+  $ui.BtnRun.IsEnabled = $true
+  Refresh-Resume
+})
+$ui.BtnFresh.Add_Click({
+  Clear-Journal
+  Refresh-Resume
+  Notice "Le passage interrompu est mis de côté : ses fichiers restent là où ils sont. Lancer le passage repart de A." "info"
 })
 $ui.BtnStop.Add_Click({ $script:stop = $true })
 $ui.BtnOpen.Add_Click({ Open-Files })
@@ -1235,4 +1575,5 @@ $ui.BtnCopy.Add_Click({
 
 Apply-Config
 Update-Summary
+Refresh-Resume
 [void]$win.ShowDialog()

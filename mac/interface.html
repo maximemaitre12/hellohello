@@ -1,0 +1,490 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Adresses Outlook</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #F6F8FC; --card: #FFFFFF; --line: #E6EBF2; --ink: #0F172A; --ink2: #334155; --muted: #5B6A80; --faint: #94A3B8;
+    --brand: #1E4D8C; --brand-dark: #173E73; --brand-soft: #E8F0FA; --info-bg: #EEF4FC;
+    --ok-bg: #DCFCE7; --ok: #15803D; --warn-bg: #FEF3C7; --warn: #92400E; --chip: #EEF2F8; --chip-ink: #7A879A; --track: #E8EEF6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0F141C; --card: #161D28; --line: #263042; --ink: #E7ECF3; --ink2: #C5CEDA; --muted: #93A1B5; --faint: #64748B;
+      --brand: #4F86D1; --brand-dark: #3B72BE; --brand-soft: #1C2B42; --info-bg: #17253A;
+      --ok-bg: #12301F; --ok: #5FD38D; --warn-bg: #33270F; --warn: #F2C46B; --chip: #1E2735; --chip-ink: #8391A6; --track: #222C3B;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; -webkit-user-select: none; user-select: none; }
+  input { -webkit-user-select: text; user-select: text; }
+  .wrap { padding: 18px 20px 20px; }
+  header { display: flex; gap: 14px; align-items: center; margin-bottom: 14px; }
+  .logo { width: 44px; height: 44px; border-radius: 12px; background: var(--brand); color: #fff; display: grid; place-items: center; font-size: 22px; font-weight: 700; flex: none; }
+  h1 { font-size: 19px; margin: 0; }
+  .sub { color: var(--muted); }
+  .tabs { display: inline-flex; background: var(--chip); border-radius: 11px; padding: 3px; margin-bottom: 14px; }
+  .tabs button { border: 0; background: transparent; color: var(--muted); font: inherit; font-weight: 600; padding: 7px 16px; border-radius: 9px; cursor: pointer; }
+  .tabs button[aria-selected="true"] { background: var(--card); color: var(--ink); box-shadow: 0 1px 3px rgba(15,23,42,.12); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; margin-bottom: 12px; }
+  .card.resume { border-color: var(--brand); gap: 12px; }
+  .row { display: flex; align-items: center; gap: 10px; }
+  .spread { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+  .label { font-weight: 600; color: var(--ink2); margin: 0 0 6px; }
+  .small { font-size: 12px; color: var(--muted); }
+  .help { font-size: 12px; color: var(--muted); margin: 6px 0 14px; }
+  .pills { display: flex; flex-wrap: wrap; gap: 6px; }
+  .pill { border: 1px solid var(--line); background: var(--card); color: var(--ink2); font: inherit; font-weight: 600; padding: 7px 14px; border-radius: 999px; cursor: pointer; }
+  .pill[aria-pressed="true"] { background: var(--brand); border-color: var(--brand); color: #fff; }
+  .btn { border: 1px solid var(--line); background: var(--card); color: var(--ink2); font: inherit; font-weight: 600; padding: 10px 16px; border-radius: 10px; cursor: pointer; white-space: nowrap; }
+  .btn:hover:not(:disabled) { background: var(--bg); }
+  .btn.primary { background: var(--brand); border-color: var(--brand); color: #fff; font-size: 14px; flex: 1; }
+  .btn.primary:hover:not(:disabled) { background: var(--brand-dark); }
+  .btn:disabled { opacity: .45; cursor: default; }
+  input[type=text], input[type=number] { width: 100%; font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; outline: none; }
+  input:focus { border-color: var(--brand); }
+  .switch { display: flex; align-items: center; gap: 10px; margin: 8px 0; cursor: pointer; }
+  .switch input { width: 34px; height: 20px; -webkit-appearance: none; appearance: none; background: var(--track); border-radius: 999px; position: relative; cursor: pointer; flex: none; margin: 0; }
+  .switch input::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: left .15s; box-shadow: 0 1px 2px rgba(0,0,0,.25); }
+  .switch input:checked { background: var(--brand); }
+  .switch input:checked::after { left: 16px; }
+  .chips { display: grid; grid-template-columns: repeat(13, 1fr); gap: 4px; margin-top: 12px; }
+  .chip { height: 28px; border-radius: 7px; display: grid; place-items: center; font-weight: 600; font-size: 12px; background: var(--chip); color: var(--chip-ink); border: 2px solid transparent; }
+  .chip.now { background: var(--card); border-color: var(--brand); color: var(--brand); }
+  .chip.ok { background: var(--brand); color: #fff; }
+  .chip.none { background: var(--warn-bg); color: var(--warn); }
+  .bar { height: 6px; background: var(--track); border-radius: 3px; margin-top: 14px; overflow: hidden; }
+  .bar > div { height: 100%; width: 0; background: var(--brand); border-radius: 3px; transition: width .2s; }
+  .notice { border-radius: 10px; padding: 10px 12px; background: var(--info-bg); color: var(--brand); margin-bottom: 12px; }
+  .notice.ok { background: var(--ok-bg); color: var(--ok); }
+  .notice.warn { background: var(--warn-bg); color: var(--warn); }
+  .results { max-height: 240px; overflow-y: auto; padding: 0 16px 10px; }
+  .res { display: flex; gap: 12px; margin-bottom: 10px; }
+  .badge { min-width: 30px; height: 30px; padding: 0 7px; border-radius: 8px; background: var(--brand-soft); color: var(--brand); display: grid; place-items: center; font-weight: 700; font-size: 12px; flex: none; }
+  .res .m { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .res .n { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .res > div:last-child { min-width: 0; }
+  .empty { color: var(--faint); text-align: center; padding: 18px 0; }
+  .section { font-size: 15px; font-weight: 700; margin: 0 0 12px; }
+  .explain { background: var(--info-bg); color: var(--brand); border-radius: 10px; padding: 10px 12px; font-size: 12px; margin-bottom: 12px; }
+  .folder { flex: 1; min-width: 0; background: var(--bg); border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink2); }
+  [hidden] { display: none !important; }
+
+  /* Panneau compact, pendant le passage. */
+  .compact { padding: 14px 18px; }
+  .compact .q { font-size: 28px; font-weight: 700; color: var(--brand); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .compact .mail { color: var(--muted); margin: 2px 0 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .compact .bar { margin-top: 0; }
+  .compact .touch { color: #B45309; font-size: 12px; }
+
+  /* Accès à autoriser. */
+  .gate ol { margin: 8px 0 14px; padding-left: 20px; }
+  .gate li { margin-bottom: 6px; }
+</style>
+</head>
+<body>
+
+<!-- ================================================ accès à autoriser -->
+<div class="wrap gate" id="gate" hidden>
+  <header>
+    <div class="logo">@</div>
+    <div><h1>Une autorisation à donner</h1><div class="sub">Une seule fois, sur ce Mac</div></div>
+  </header>
+  <div class="card">
+    <p style="margin-top:0">Pour taper dans le champ « À » et lire les suggestions de votre messagerie, macOS doit autoriser l'app à utiliser l'accessibilité. Une seule fois, sur ce Mac.</p>
+    <ol>
+      <li>Cliquez sur <b>Autoriser</b> : macOS ouvre ses réglages.</li>
+      <li>Dans <b>Accessibilité</b>, activez <b>Adresses Outlook</b> (votre mot de passe ou Touch ID peut être demandé).</li>
+      <li>Revenez ici : l'app continue toute seule.</li>
+    </ol>
+    <p class="small" id="gateEtat" style="margin:0">En attente de l'autorisation...</p>
+  </div>
+  <div class="row">
+    <button class="btn primary" id="gateOpen">Autoriser</button>
+    <button class="btn" id="gateRelaunch" hidden>Relancer l'app</button>
+  </div>
+  <div class="notice warn" id="gateMsg" style="margin-top:12px" hidden></div>
+</div>
+
+<!-- ================================================ fenêtre normale -->
+<div class="wrap" id="full" hidden>
+  <header>
+    <div class="logo">@</div>
+    <div><h1 id="appTitle">Adresses Outlook</h1><div class="sub">Toutes les adresses que propose votre messagerie</div></div>
+  </header>
+
+  <div class="tabs" role="tablist">
+    <button role="tab" id="tabRun" aria-selected="true">Recherche</button>
+    <button role="tab" id="tabSet" aria-selected="false">Paramètres</button>
+  </div>
+
+  <!-- onglet Recherche -->
+  <div id="pageRun">
+    <div class="row" style="margin-bottom:12px">
+      <span class="label" style="margin:0 6px 0 2px">Chercher dans</span>
+      <div class="pills" data-group="Source">
+        <button class="pill" data-value="outlook">Outlook</button>
+        <button class="pill" data-value="gmail">Gmail</button>
+      </div>
+    </div>
+
+    <div class="card spread" style="padding:12px 16px">
+      <div><div class="small">Ce qui va se passer</div><div id="plan" style="font-weight:600;margin-top:2px"></div></div>
+      <button class="btn" id="btnEdit">Modifier</button>
+    </div>
+
+    <div class="card">
+      <div class="spread"><b>Progression</b><span class="small" id="count">0 recherche</span></div>
+      <div class="chips" id="chips"></div>
+      <div class="bar"><div id="fill"></div></div>
+    </div>
+
+    <div class="card spread resume" id="resumeBox" hidden>
+      <div><b>Passage interrompu</b><div class="small" id="resumeText" style="margin-top:2px"></div></div>
+      <button class="btn" id="btnFresh">Repartir de zéro</button>
+    </div>
+
+    <div class="row" style="margin-bottom:12px">
+      <button class="btn primary" id="btnRun">Lancer le passage</button>
+      <button class="btn" id="btnOpen" disabled>Ouvrir le fichier</button>
+      <button class="btn" id="btnCopy" disabled>Copier</button>
+    </div>
+
+    <div class="notice" id="notice"></div>
+
+    <div class="card" style="padding:0">
+      <div class="spread" style="padding:12px 16px 8px"><b>Résultats</b><span class="small" id="distinct"></span></div>
+      <div class="results" id="rows"><div class="empty" id="empty">Les adresses apparaîtront ici.</div></div>
+    </div>
+  </div>
+
+  <!-- onglet Paramètres -->
+  <div id="pageSet" hidden>
+    <div class="card">
+      <p class="section">1. Quoi chercher</p>
+      <div class="explain"><b>Le passage va jusqu'au bout, sans limite de recherches.</b><br>Il commence par les 26 lettres. Quand la liste de suggestions est pleine, des adresses restent cachées dessous : la recherche devient une piste à creuser (a devient al, am, an...). Les pistes passent par ordre de rendement, sur tout l'alphabet, et un nom trop courant pour être départagé par une lettre l'est par un deuxième mot (martin j, martin s...). Il s'arrête seul quand il n'y a plus rien à trouver. Chaque adresse est enregistrée dès qu'elle est trouvée : vous pouvez arrêter à tout moment, et reprendre plus tard là où vous en étiez.</div>
+      <p class="label">Préfixe (facultatif)</p>
+      <input type="text" id="Prefix" spellcheck="false" autocapitalize="off" autocorrect="off">
+      <p class="help">Placé devant chaque recherche. Avec « ma », la messagerie reçoit maa, mab, mac... puis approfondit à partir de là.</p>
+      <div id="gmailBox">
+        <p class="label">Compte Gmail (facultatif)</p>
+        <input type="text" id="GmailAccount" spellcheck="false" autocapitalize="off" autocorrect="off">
+        <p class="help" style="margin-bottom:0">Seulement si plusieurs comptes Google sont connectés dans votre navigateur : l'adresse du compte à utiliser. Vide : le compte principal.</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <p class="section">2. Quoi garder</p>
+      <p class="label">Garder seulement ces domaines (facultatif)</p>
+      <input type="text" id="Keep" spellcheck="false" autocapitalize="off" autocorrect="off">
+      <p class="help">Séparés par des virgules, par exemple : test.com, deloitte.fr. Les sous-domaines comptent.</p>
+      <p class="label">Exclure (facultatif)</p>
+      <input type="text" id="Exclude" spellcheck="false" autocapitalize="off" autocorrect="off">
+      <p class="help">Domaines ou adresses exactes, séparés par des virgules. Pratique pour retirer votre propre adresse.</p>
+      <label class="switch"><input type="checkbox" id="Dedupe"> Ne noter chaque adresse qu'une seule fois</label>
+    </div>
+
+    <div class="card">
+      <p class="section">3. Rythme</p>
+      <div class="pills" data-group="Speed">
+        <button class="pill" data-value="fast">Rapide</button>
+        <button class="pill" data-value="normal">Normal</button>
+        <button class="pill" data-value="careful">Prudent</button>
+      </div>
+      <p class="help" id="speedHelp" style="margin-bottom:0"></p>
+    </div>
+
+    <div class="card">
+      <p class="section">4. Enregistrement</p>
+      <p class="label">Format du fichier</p>
+      <div class="pills" data-group="Format" style="margin-bottom:12px">
+        <button class="pill" data-value="txt">Texte</button>
+        <button class="pill" data-value="csv">CSV pour Excel</button>
+        <button class="pill" data-value="both">Les deux</button>
+      </div>
+      <p class="label">Dossier</p>
+      <div class="row"><div class="folder" id="folder"></div><button class="btn" id="btnFolder">Choisir</button></div>
+      <div style="margin-top:12px">
+        <label class="switch"><input type="checkbox" id="OpenAtEnd"> Ouvrir le fichier à la fin</label>
+        <label class="switch"><input type="checkbox" id="CopyAtEnd"> Copier les adresses dans le presse-papiers à la fin</label>
+      </div>
+    </div>
+
+    <div class="card">
+      <p class="section">5. Si ça ne marche pas</p>
+      <p class="help" style="margin-top:0">Le diagnostic ouvre un nouveau message, tape « a », relève ce que macOS montre de la messagerie, puis efface. Il enregistre un fichier sur le bureau, à envoyer pour que l'app soit ajustée. Rien n'est envoyé.</p>
+      <button class="btn" id="btnDiag">Lancer le diagnostic</button>
+    </div>
+
+    <div class="spread" style="margin:4px 2px">
+      <span class="small">Vos réglages sont gardés pour la prochaine fois.</span>
+      <button class="btn" id="btnReset">Réglages d'origine</button>
+    </div>
+  </div>
+</div>
+
+<!-- ================================================ panneau compact -->
+<div class="compact" id="compact" hidden>
+  <div class="spread">
+    <div class="q" id="liveQuery">A</div>
+    <div style="text-align:right"><div style="font-weight:600" id="liveCount">0 recherche</div><div class="small" id="liveEta"></div></div>
+  </div>
+  <div class="mail" id="liveMail">Ouverture d'un nouveau message</div>
+  <div class="bar"><div id="liveFill"></div></div>
+  <div class="spread" style="margin-top:12px">
+    <span class="touch">Ne touchez à rien</span>
+    <button class="btn" id="btnStop">Arrêter</button>
+  </div>
+</div>
+
+<script src="planif.js"></script>
+<script src="moteur.js"></script>
+<script>
+"use strict";
+
+// ------------------------------------------------------------ pont natif
+// L'hôte Mac reçoit {id, op, args} et répond par window.__natif(id, ok, valeur).
+var attente = {}, seq = 0;
+function natif(op, args) {
+  return new Promise(function (resolve, reject) {
+    var id = ++seq;
+    attente[id] = { resolve: resolve, reject: reject };
+    var msg = JSON.stringify({ id: id, op: op, args: args || {} });
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.natif) window.webkit.messageHandlers.natif.postMessage(msg);
+    else setTimeout(function () { window.__natif(id, true, apercu(op, args || {})); }, 20);
+  });
+}
+window.__natif = function (id, ok, valeur) {
+  var p = attente[id]; if (!p) return;
+  delete attente[id];
+  if (ok) p.resolve(valeur); else p.reject(new Error(valeur));
+};
+// Hors du Mac (aperçu dans un navigateur) : réponses de démonstration.
+function apercu(op) {
+  if (op === "init") return { acces: true, bureau: "/Users/vous/Desktop", reglages: null };
+  if (op === "existe") return true;
+  return null;
+}
+
+// ------------------------------------------------------------ écran
+var $ = function (id) { return document.getElementById(id); };
+var cfg, desktop = "", moteur, running = false, hasRun = false;
+
+function show(view) {
+  $("gate").hidden = view !== "gate";
+  $("full").hidden = view !== "full";
+  $("compact").hidden = view !== "compact";
+}
+
+function setPills(group, value) {
+  document.querySelectorAll('[data-group="' + group + '"] .pill').forEach(function (b) {
+    b.setAttribute("aria-pressed", String(b.dataset.value === String(value)));
+  });
+}
+
+function applyConfig() {
+  ["Source", "Speed", "Format"].forEach(function (g) { setPills(g, cfg[g]); });
+  ["Prefix", "GmailAccount", "Keep", "Exclude"].forEach(function (k) { $(k).value = cfg[k]; });
+  ["Dedupe", "OpenAtEnd", "CopyAtEnd"].forEach(function (k) { $(k).checked = !!cfg[k]; });
+  $("folder").textContent = cfg.Folder;
+}
+
+function readConfig() {
+  cfg.Prefix = $("Prefix").value.replace(/[;,]/g, "").trim();
+  cfg.GmailAccount = $("GmailAccount").value.trim();
+  cfg.Keep = $("Keep").value.trim();
+  cfg.Exclude = $("Exclude").value.trim();
+  ["Dedupe", "OpenAtEnd", "CopyAtEnd"].forEach(function (k) { cfg[k] = $(k).checked; });
+}
+
+var saveTimer = null;
+function update() {
+  readConfig();
+  var src = Moteur.sourceName(cfg);
+  $("appTitle").textContent = "Adresses " + src;
+  document.title = "Adresses " + src;
+  $("gmailBox").hidden = cfg.Source !== "gmail";
+  if (!hasRun) {
+    notice(cfg.Source === "gmail"
+      ? "Gmail s'ouvrira dans votre navigateur par défaut, sur un nouveau message. Pendant le passage, ne touchez ni au clavier ni à la souris. Rien n'est envoyé."
+      : "Gardez Outlook ouvert. Pendant le passage, ne touchez ni au clavier ni à la souris. Rien n'est envoyé.", "");
+  }
+  $("plan").textContent = Moteur.planText(cfg);
+  $("speedHelp").textContent = Moteur.SPEEDS[cfg.Speed].text;
+  if (!running) buildChips();
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(function () { natif("sauverReglages", { json: JSON.stringify(cfg) }); }, 300);
+}
+
+function buildChips() {
+  var box = $("chips"); box.innerHTML = "";
+  for (var c = 0; c < 26; c++) {
+    var q = cfg.Prefix + String.fromCharCode(97 + c);
+    var d = document.createElement("div");
+    d.className = "chip"; d.dataset.q = q; d.textContent = String.fromCharCode(65 + c);
+    box.appendChild(d);
+  }
+  progress(0, 0, "");
+}
+
+function notice(text, kind) { var n = $("notice"); n.textContent = text; n.className = "notice" + (kind ? " " + kind : ""); }
+
+// Le nombre de recherches à venir n'est connu qu'à peu près : on affiche
+// celles qui sont faites, et la barre suit l'estimation.
+function progress(done, total, eta) {
+  var label = Moteur.plural(done, "recherche", "recherches");
+  $("count").textContent = label; $("liveCount").textContent = label;
+  var pct = total ? Math.round(100 * done / total) + "%" : "0%";
+  $("fill").style.width = pct; $("liveFill").style.width = pct;
+  $("liveEta").textContent = eta || "";
+}
+
+function resetResults() {
+  $("rows").innerHTML = ""; var e = document.createElement("div");
+  e.className = "empty"; e.id = "empty"; e.textContent = "Les adresses apparaîtront ici.";
+  $("rows").appendChild(e); $("distinct").textContent = "";
+}
+
+var ui = {
+  debut: function () {
+    running = true; hasRun = true;
+    resetResults(); buildChips();
+    $("liveQuery").textContent = "…"; $("liveMail").textContent = "Ouverture d'un nouveau message"; $("liveEta").textContent = "";
+    show("compact"); natif("compact", { on: true });
+  },
+  chip: function (q, state) {
+    var d = document.querySelector('.chip[data-q="' + CSS.escape(q) + '"]');
+    if (d) d.className = "chip " + state;
+  },
+  live: function (q, mail) { if (q) $("liveQuery").textContent = q; if (mail) $("liveMail").textContent = mail; },
+  row: function (q, mail, name) {
+    var e = $("empty"); if (e) e.remove();
+    var r = document.createElement("div"); r.className = "res";
+    var b = document.createElement("div"); b.className = "badge"; b.textContent = (q.length > 10 ? q.slice(0, 9) + "…" : q).toUpperCase();
+    var t = document.createElement("div");
+    var m = document.createElement("div"); m.className = "m"; m.textContent = mail;
+    var n = document.createElement("div"); n.className = "n"; n.textContent = name !== mail ? name : "";
+    t.appendChild(m); if (n.textContent) t.appendChild(n);
+    r.appendChild(b); r.appendChild(t); $("rows").appendChild(r);
+  },
+  progress: progress,
+  // Une reprise remet les réglages du passage commencé.
+  reglages: function (c) { cfg = c; applyConfig(); update(); },
+  fin: function (msg, kind, info) {
+    running = false;
+    natif("compact", { on: false });
+    show("full");
+    notice(msg, kind);
+    var files = (info && info.files) || [];
+    $("btnOpen").disabled = files.length === 0;
+    $("btnCopy").disabled = !(moteur.distinct && moteur.distinct.length);
+    if (info && info.distinct !== undefined) $("distinct").textContent = Moteur.plural(info.distinct, "adresse distincte", "adresses distinctes");
+    $("btnRun").disabled = false; $("btnDiag").disabled = false;
+    refreshResume();
+  }
+};
+
+// Affiche, ou non, la proposition de reprendre un passage interrompu.
+var resumable = false;
+async function refreshResume() {
+  var r = moteur ? await moteur.reprise() : null;
+  resumable = !!r;
+  $("resumeBox").hidden = !r;
+  if (r) $("resumeText").textContent = r.text;
+  $("btnRun").textContent = r ? "Reprendre le passage" : hasRun ? "Relancer" : "Lancer le passage";
+}
+
+function tab(which) {
+  $("tabRun").setAttribute("aria-selected", String(which === "run"));
+  $("tabSet").setAttribute("aria-selected", String(which === "set"));
+  $("pageRun").hidden = which !== "run"; $("pageSet").hidden = which !== "set";
+}
+
+// ------------------------------------------------------------ branchements
+document.querySelectorAll("[data-group]").forEach(function (g) {
+  g.addEventListener("click", function (e) {
+    var b = e.target.closest(".pill"); if (!b) return;
+    var v = b.dataset.value;
+    cfg[g.dataset.group] = g.hasAttribute("data-number") ? parseInt(v, 10) : v;
+    setPills(g.dataset.group, v); update();
+  });
+});
+["Prefix", "GmailAccount", "Keep", "Exclude"].forEach(function (k) { $(k).addEventListener("input", update); });
+["Dedupe", "OpenAtEnd", "CopyAtEnd"].forEach(function (k) { $(k).addEventListener("change", update); });
+$("tabRun").onclick = function () { tab("run"); };
+$("tabSet").onclick = function () { tab("set"); };
+$("btnEdit").onclick = function () { tab("set"); };
+
+$("btnFolder").onclick = async function () {
+  var p = await natif("choisirDossier", { actuel: cfg.Folder });
+  if (p) { cfg.Folder = p; $("folder").textContent = p; update(); }
+};
+$("btnReset").onclick = function () { cfg = Moteur.defaults(desktop); applyConfig(); update(); };
+
+async function lancer(fn) {
+  if (running) return;
+  readConfig();
+  $("btnRun").disabled = true; $("btnOpen").disabled = true; $("btnCopy").disabled = true; $("btnDiag").disabled = true;
+  try { await fn(); }
+  catch (e) { ui.fin("Erreur : " + (e && e.message ? e.message : e), "warn"); }
+}
+$("btnRun").onclick = function () { tab("run"); var r = resumable; lancer(function () { return moteur.passage(cfg, r); }); };
+$("btnFresh").onclick = async function () {
+  await moteur.oublierReprise();
+  await refreshResume();
+  notice("Le passage interrompu est mis de côté : ses fichiers restent là où ils sont. Lancer le passage repart de A.", "");
+};
+$("btnDiag").onclick = function () { tab("run"); lancer(function () { return moteur.diagnostic(cfg); }); };
+$("btnStop").onclick = function () { moteur.stop = true; $("liveMail").textContent = "Arrêt après cette recherche"; };
+$("btnOpen").onclick = function () { moteur.ouvrirFichiers(); };
+$("btnCopy").onclick = async function () {
+  if (!moteur.distinct.length) return;
+  await natif("copier", { texte: moteur.distinct.join("\n") });
+  notice(Moteur.plural(moteur.distinct.length, "adresse copiée", "adresses copiées") + ", une par ligne.", "ok");
+};
+
+// L'autorisation est guettée chaque seconde : dès qu'elle est donnée, l'app
+// s'ouvre. Si macOS tarde à la transmettre, on propose de relancer l'app.
+var guet = null, demandeA = 0;
+function guetter() {
+  if (guet) return;
+  guet = setInterval(async function () {
+    if (!(await natif("acces", {}))) {
+      if (demandeA && Date.now() - demandeA > 20000 && $("gateRelaunch").hidden) {
+        $("gateRelaunch").hidden = false;
+        var m = $("gateMsg"); m.hidden = false;
+        m.textContent = "Si Adresses Outlook est bien activé dans Accessibilité, macOS attend peut-être un redémarrage de l'app : cliquez sur Relancer l'app.";
+      }
+      return;
+    }
+    clearInterval(guet); guet = null;
+    show("full");
+    await refreshResume();
+  }, 1000);
+}
+$("gateOpen").onclick = function () {
+  demandeA = Date.now();
+  $("gateEtat").textContent = "Réglages ouverts : activez Adresses Outlook, puis revenez ici.";
+  natif("demanderAcces", {});
+};
+$("gateRelaunch").onclick = function () { natif("relancer", {}); };
+
+// ------------------------------------------------------------ démarrage
+(async function () {
+  var r = await natif("init", {});
+  desktop = r.bureau || "";
+  var saved = null;
+  try { saved = r.reglages ? JSON.parse(r.reglages) : null; } catch (e) { saved = null; }
+  cfg = Moteur.merge(Moteur.defaults(desktop), saved);
+  if (!(await natif("existe", { chemin: cfg.Folder }))) cfg.Folder = desktop;
+  moteur = new Moteur(natif, ui, null, r.journal || "");
+  applyConfig(); update();
+  await refreshResume();
+  show(r.acces ? "full" : "gate");
+  if (!r.acces) guetter();
+})();
+</script>
+</body>
+</html>
