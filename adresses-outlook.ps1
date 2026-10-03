@@ -20,13 +20,26 @@
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, UIAutomationClient, UIAutomationTypes
 Add-Type @"
-using System; using System.Runtime.InteropServices;
+using System; using System.Text; using System.Runtime.InteropServices;
 public class Fen {
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   [DllImport("user32.dll")] public static extern void keybd_event(byte k, byte s, uint f, UIntPtr e);
+  [DllImport("user32.dll")] static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
+  delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr parent, EnumProc cb, IntPtr l);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder sb, int n);
+  // Chrome et Edge ne montrent le contenu de la page à l'accessibilité de
+  // Windows qu'une fois qu'on le leur demande : on le leur demande.
+  public static void ReveillerPage(IntPtr top) {
+    if (top == IntPtr.Zero) return;
+    EnumChildWindows(top, (h, l) => {
+      StringBuilder sb = new StringBuilder(256); GetClassName(h, sb, 256);
+      if (sb.ToString() == "Chrome_RenderWidgetHostHWND") { IntPtr r; SendMessageTimeout(h, 0x003D, IntPtr.Zero, (IntPtr)(-4), 2, 500, out r); }
+      return true; }, IntPtr.Zero);
+  }
 }
 "@
 
@@ -1039,12 +1052,16 @@ function Source-Name { if ($cfg.Source -eq "gmail") { "Gmail" } else { "Outlook"
 # Outlook : un groupe nommé « À » (ou « To »). Gmail : le champ des
 # destinataires est la liste déroulante qui a le curseur, dans le navigateur
 # ouvert sur Gmail. Son nom dépend de la langue de Gmail, on ne s'y fie pas.
+# Dès que Gmail montre ses suggestions, Windows annonce le curseur sur la
+# suggestion surlignée, alors que les frappes vont toujours dans « À » : une
+# suggestion du même navigateur compte donc aussi.
 $script:targetPid = 0
 function Focus-Dans-Champ-A {
-  $f = $AE::FocusedElement
+  $f = try { $AE::FocusedElement } catch { $null }
   if (-not $f) { return $false }
   if ($cfg.Source -eq "gmail") {
-    return ($f.Current.ControlType -eq $CT::ComboBox -and $f.Current.ProcessId -eq $script:targetPid)
+    $type = $f.Current.ControlType
+    return (($type -eq $CT::ComboBox -or $type -eq $CT::ListItem) -and $f.Current.ProcessId -eq $script:targetPid)
   }
   return ($f.Current.ControlType -eq $CT::Group -and ($f.Current.Name -eq $ChampA -or $f.Current.Name -eq "To"))
 }
@@ -1079,7 +1096,9 @@ function Parse-Gmail([string[]]$names) {
 
 # Toutes les suggestions affichées, dans l'ordre : @{ Name; Mail }.
 function Lire-Suggestions($p) {
-  $racine = $AE::FromHandle($p.MainWindowHandle)
+  if ($p.MainWindowHandle -eq [IntPtr]::Zero) { return @() }
+  $racine = try { $AE::FromHandle($p.MainWindowHandle) } catch { $null }
+  if (-not $racine) { return @() }
   if ($cfg.Source -eq "gmail") {
     $items = $racine.FindAll($Scope::Descendants,
       (New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, $CT::ListItem)))
@@ -1143,17 +1162,24 @@ function Ouvrir-Gmail {
   if ($acct -notmatch '^(\d+|[^@\s/?#]+@[^@\s/?#]+)$') { $acct = "0" }
   [Fen]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero); [Fen]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
   Start-Process ("https://mail.google.com/mail/u/" + [Uri]::EscapeDataString($acct) + "/?view=cm&fs=1&tf=1")
+  # On reconnaît le nouveau message à son champ « À » qui a le curseur, pas au
+  # titre de la fenêtre : celui d'un compte d'école ou d'entreprise ne dit pas
+  # « Gmail » (« Compose Mail - ... University Mail »).
   $vu = $false
   for ($i = 0; $i -lt 40; $i++) {
     Wait 500
     $h = [Fen]::GetForegroundWindow()
+    # Pendant un changement de fenêtre, Windows n'en annonce parfois aucune.
+    if ($h -eq [IntPtr]::Zero) { continue }
     $procId = 0; [Fen]::GetWindowThreadProcessId($h, [ref]$procId) | Out-Null
-    $t = (Get-Process -Id $procId -ErrorAction SilentlyContinue).MainWindowTitle
-    $titre = $AE::FromHandle($h).Current.Name
-    if ($titre -notmatch 'Gmail' -and $t -notmatch 'Gmail') { continue }
-    $vu = $true
-    $script:targetPid = $procId
-    if (Focus-Dans-Champ-A) { return [pscustomobject]@{ Id = $procId; MainWindowHandle = $h } }
+    $titre = (Get-Process -Id $procId -ErrorAction SilentlyContinue).MainWindowTitle
+    if ($titre -match 'Mail|Gmail|Compose|Nouveau message') { $vu = $true }
+    [Fen]::ReveillerPage($h)
+    $f = try { $AE::FocusedElement } catch { $null }
+    if ($f -and $f.Current.ProcessId -eq $procId -and $f.Current.ControlType -eq $CT::ComboBox) {
+      $script:targetPid = $procId
+      return [pscustomobject]@{ Id = $procId; MainWindowHandle = $h }
+    }
   }
   if ($vu) { return "Gmail s'est ouvert, mais pas sur un nouveau message avec le curseur dans « À ». Vérifiez que vous êtes connecté à Gmail dans votre navigateur. Rien n'a été tapé." }
   return "Le navigateur n'a pas affiché Gmail. Ouvrez Gmail une fois dans votre navigateur par défaut, connectez-vous, puis relancez. Rien n'a été tapé."
