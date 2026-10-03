@@ -1,6 +1,7 @@
 # Fabrique et teste Adresses Outlook pour Mac sur un Mac de GitHub, à chaque
-# modification de la version Mac. L'app prête à double-cliquer est dans les
-# « artifacts » de la construction : « Adresses Outlook pour Mac ».
+# modification de la version Mac. L'app prête à double-cliquer, le bilan des
+# tests et des captures d'écran sont publiés dans la release « mac-derniere »
+# du dépôt, téléchargeable sans compte.
 name: App Mac
 
 on:
@@ -11,13 +12,17 @@ on:
 jobs:
   mac:
     runs-on: macos-14
+    permissions:
+      contents: write
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Construire l'app
         run: bash mac/natif/construire.sh dist
       - name: La lancer et la tester sur ce Mac
-        run: bash mac/natif/tester.sh dist
+        run: |
+          set -o pipefail
+          bash mac/natif/tester.sh dist 2>&1 | tee dist/resultats.txt
       - name: Garder l'app
         if: always()
         uses: actions/upload-artifact@v4
@@ -30,3 +35,11 @@ jobs:
         with:
           name: tests
           path: dist/tests
+      - name: Publier l'app et le bilan
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          (cd dist/tests && zip -qr ../tests.zip .) || true
+          gh release delete mac-derniere --yes --cleanup-tag || true
+          gh release create mac-derniere --title "Adresses Outlook pour Mac" --notes-file dist/resultats.txt             "dist/Adresses Outlook pour Mac.zip" dist/resultats.txt dist/tests.zip
