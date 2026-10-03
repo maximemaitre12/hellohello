@@ -101,7 +101,8 @@ else:
     else:
         lignes = open(csv[0], encoding="utf-8-sig").read().splitlines()
         if lignes[0] != "Recherche;Rang;Nom;Adresse" or len(lignes) - 1 != len(trouves): ko.append("CSV : %d lignes pour %d adresses" % (len(lignes) - 1, len(trouves)))
-        if "Adresses distinctes : %d" % len(trouves) not in open(txt[0], encoding="utf-8").read(): ko.append("fin du fichier texte")
+        tl = [l for l in open(txt[0], encoding="utf-8").read().splitlines() if l]
+        if sorted(tl) != sorted(trouves): ko.append("le texte n'est pas la liste des adresses, une par ligne (%d lignes)" % len(tl))
     if os.path.exists(os.path.join(support, "reprise.jsonl")): ko.append("journal de reprise non effacé")
 for k in ko: print("ECHEC : " + k)
 sys.exit(1 if ko else 0)

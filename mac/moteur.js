@@ -27,7 +27,9 @@
     return {
       Source: "outlook", GmailAccount: "", Prefix: "",
       Keep: "", Exclude: "", Dedupe: true, Speed: "normal",
-      Format: "txt", Folder: desktop || "", OpenAtEnd: false, CopyAtEnd: false
+      Format: "txt", Folder: desktop || "", OpenAtEnd: false, CopyAtEnd: false,
+      // Le fichier du dernier passage, pour Exporter et Copier au prochain lancement.
+      Dernier: ""
     };
   }
 
@@ -268,7 +270,6 @@
   var US = String.fromCharCode(31), RS = String.fromCharCode(30);
   var HEAD_KEYS = ["Source", "GmailAccount", "Prefix", "Keep", "Exclude", "Dedupe", "Format"];
 
-  function txtLine(r) { return r.query + " : " + r.mail + "    (" + r.name + ")"; }
   function csvLine(r) { return csvField(r.query) + ";" + r.rank + ";" + csvField(r.name) + ";" + csvField(r.mail); }
 
   function journalLine(q, list, keep) {
@@ -281,7 +282,7 @@
     var lines = String(text).replace(/^﻿/, "").split("\n");
     var head;
     try { head = JSON.parse(lines[0]); } catch (e) { return null; }
-    var entries = [], kept = {};
+    var entries = [], kept = new Map();
     for (var i = 1; i < lines.length; i++) {
       var line = lines[i].replace(/\r$/, "");
       var tab = line.indexOf("\t");
@@ -293,13 +294,13 @@
           var f = items[k].split(US);
           if (f.length !== 3) { ok = false; break; }
           e.names.push(f[0]); e.mails.push(f[1]); e.keep.push(f[2] === "1");
-          if (f[2] === "1") kept[f[1]] = 1;
+          if (f[2] === "1") kept.set(f[1].toLowerCase(), 1);
         }
       }
       if (!ok) break;
       entries.push(e);
     }
-    return { head: head, entries: entries, kept: Object.keys(kept).length };
+    return { head: head, entries: entries, kept: kept.size, keptList: Array.from(kept.keys()) };
   }
 
   Moteur.journalLine = journalLine;
@@ -319,6 +320,34 @@
         ", dans " + String(j.head.Base).split("/").pop() + ". Reprendre continue là où il s'était arrêté, dans le même fichier, sans retaper ce qui est fait.",
       head: j.head
     };
+  };
+
+  // Les adresses déjà trouvées, pour Exporter et Copier dès l'ouverture :
+  // celles du passage interrompu, sinon celles du dernier passage.
+  Moteur.prototype.connues = async function (cfg) {
+    var n = this.natif, out = [];
+    var j = this.journal ? parseJournal(await n("lireTexte", { chemin: this.journal })) : null;
+    if (j && j.entries.length) out = j.keptList;
+    else if (cfg.Dernier) {
+      var t = await n("lireTexte", { chemin: cfg.Dernier });
+      if (t) {
+        var lignes = String(t).replace(/^\uFEFF/, "").split(/\r?\n/);
+        if (/\.csv$/.test(cfg.Dernier)) lignes = lignes.slice(1).map(function (l) { return l.split(";").pop().replace(/"/g, ""); });
+        out = lignes.map(function (l) { return l.trim().toLowerCase(); }).filter(function (l) { return /^[^\s@]+@[^\s@]+$/.test(l); });
+      }
+    }
+    var u = {};
+    out.forEach(function (m) { u[m] = 1; });
+    this.distinct = Object.keys(u).sort();
+    return this.distinct;
+  };
+
+  // Enregistre les adresses où l'on veut : une par ligne, le plus léger possible.
+  Moteur.prototype.exporter = async function (cfg) {
+    if (!this.distinct.length) return null;
+    var d = new Date(), p2 = function (x) { return String(x).padStart(2, "0"); };
+    var nom = "adresses-" + sourceName(cfg).toLowerCase() + "-" + d.getFullYear() + "-" + p2(d.getMonth() + 1) + "-" + p2(d.getDate()) + ".txt";
+    return await this.natif("enregistrerSous", { nom: nom, dossier: cfg.Folder, texte: this.distinct.join("\n") + "\n" });
   };
 
   Moteur.prototype.oublierReprise = async function () {
@@ -404,8 +433,15 @@
     // à chaque recherche. Une reprise réécrit les fichiers proprement.
     var wantTxt = cfg.Format === "txt" || cfg.Format === "both";
     var wantCsv = cfg.Format === "csv" || cfg.Format === "both";
+    // Le texte est le format le plus léger : une adresse par ligne, chacune une
+    // seule fois, sans nom ni recherche. Le CSV garde le détail pour qui le veut.
+    var txtVus = {};
+    var txtNeufs = function (rs) {
+      return rs.filter(function (r) { if (txtVus[r.mail]) return false; txtVus[r.mail] = 1; return true; })
+               .map(function (r) { return r.mail + "\n"; }).join("");
+    };
     if (wantTxt) {
-      await n("ecrire", { chemin: base + ".txt", texte: records.map(function (r) { return txtLine(r) + "\n"; }).join("") });
+      await n("ecrire", { chemin: base + ".txt", texte: txtNeufs(records) });
       this.files.push(base + ".txt");
     }
     if (wantCsv) {
@@ -447,7 +483,8 @@
 
         var fresh = keepFrom(q, list, keep);
         if (fresh.length) {
-          if (wantTxt) await n("ajouter", { chemin: base + ".txt", texte: fresh.map(function (r) { return txtLine(r) + "\n"; }).join("") });
+          var neufs = txtNeufs(fresh);
+          if (wantTxt && neufs) await n("ajouter", { chemin: base + ".txt", texte: neufs });
           if (wantCsv) await n("ajouter", { chemin: base + ".csv", texte: fresh.map(function (r) { return csvLine(r) + "\r\n"; }).join("") });
         }
         fresh.forEach(function (r) { ui.row(r.query, r.mail, r.name); ui.live(null, r.mail); });
@@ -465,7 +502,6 @@
       var uniq = {};
       records.forEach(function (r) { uniq[r.mail] = 1; });
       this.distinct = Object.keys(uniq).sort();
-      if (wantTxt) await n("ajouter", { chemin: base + ".txt", texte: ["", "Adresses distinctes : " + this.distinct.length].concat(this.distinct).join("\n") + "\n" });
       if (this.journal) {
         if (completed) await n("supprimer", { chemin: this.journal });
         else {
@@ -480,6 +516,7 @@
     }
 
     if (records.length > 0) {
+      cfg.Dernier = this.files[0];
       if (cfg.CopyAtEnd) await n("copier", { texte: this.distinct.join("\n") });
       if (cfg.OpenAtEnd) await this.ouvrirFichiers();
     } else {

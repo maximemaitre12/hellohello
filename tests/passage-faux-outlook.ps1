@@ -114,6 +114,15 @@ if ($a.Mid -le 0) { $fails += "rien sur le disque après 60 recherches ($($a.Mid
 if ($script:staleHits -lt 20) { $fails += "le faux Outlook n'a presque pas servi de liste périmée ($script:staleHits)" }
 if ($a.Notice -notmatch "^Terminé") { $fails += "message de fin inattendu : $($a.Notice)" }
 if ($a.Resume -or (Test-Path $resumePath)) { $fails += "un passage allé au bout laisse une reprise proposée" }
+# Le texte : rien que les adresses, une par ligne, chacune une fois.
+$txt = Get-ChildItem $out -Filter "adresses-$Source-*.txt" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+$tl = @([System.IO.File]::ReadAllLines($txt.FullName) | Where-Object { $_ })
+$sansAdresse = @($tl | Where-Object { $_ -notmatch '^[^\s@]+@[^\s@]+$' })
+if ($sansAdresse.Count) { $fails += "le texte contient autre chose que des adresses : $($sansAdresse[0])" }
+if ($tl.Count -ne $a.Rows.Count -or @($tl | Sort-Object -Unique).Count -ne $tl.Count) { $fails += "le texte a $($tl.Count) lignes pour $($a.Rows.Count) adresses" }
+# Le dernier passage reste exportable au prochain lancement.
+if (-not $ui.BtnExport.IsEnabled -or $script:distinctes.Count -ne $a.Rows.Count) { $fails += "après le passage, Exporter n'est pas prêt ($($script:distinctes.Count) adresses)" }
+"   texte : $($tl.Count) lignes, $([Math]::Round($txt.Length / 1KB, 1)) Ko"
 "1. d'une traite : $($a.Typed) recherches, $($a.Rows.Count) adresses sur $($script:faux.All.Count), $($a.Mid) lignes sur le disque après 60 recherches, $($a.Secs) s"
 
 # 2. Arrêté en route.
@@ -122,7 +131,11 @@ $b = Run $false 150
 if ($b.Notice -notmatch "^Arrêté") { $fails += "arrêt : message inattendu : $($b.Notice)" }
 if (-not $b.Resume) { $fails += "arrêt : la reprise n'est pas proposée" }
 if ($ui.BtnRun.Content -ne "Reprendre le passage") { $fails += "arrêt : le bouton dit « $($ui.BtnRun.Content) »" }
-"2. arrêté : $($b.Typed) recherches, $($b.Rows.Count) adresses enregistrées"
+# Comme à l'ouverture de l'app avec un passage interrompu : Exporter et Copier servent.
+Refresh-Resume
+if (-not $ui.BtnExport.IsEnabled -or -not $ui.BtnCopy.IsEnabled) { $fails += "arrêt : Exporter ou Copier reste grisé" }
+if ($script:distinctes.Count -ne $b.Rows.Count) { $fails += "arrêt : $($script:distinctes.Count) adresses exportables pour $($b.Rows.Count) trouvées" }
+"2. arrêté : $($b.Typed) recherches, $($b.Rows.Count) adresses enregistrées, $($script:distinctes.Count) exportables"
 "   proposé : $($ui.ResumeText.Text)"
 
 # 3. Reprise : finit comme le passage d'une traite, sans retaper.

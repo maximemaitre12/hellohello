@@ -246,6 +246,15 @@ final class Hote: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
       if existe(s(a, "actuel")) { p.directoryURL = URL(fileURLWithPath: s(a, "actuel")) }
       NSApp.activate(ignoringOtherApps: true)
       return ouNull(p.runModal() == .OK ? p.url?.path : nil)
+    // Exporter : la fenêtre « Enregistrer sous » du Mac, puis le fichier.
+    case "enregistrerSous":
+      let p = NSSavePanel()
+      p.nameFieldStringValue = s(a, "nom"); p.allowedFileTypes = ["txt"]; p.canCreateDirectories = true
+      if existe(s(a, "dossier")) { p.directoryURL = URL(fileURLWithPath: s(a, "dossier")) }
+      NSApp.activate(ignoringOtherApps: true)
+      guard p.runModal() == .OK, let u = p.url else { return NSNull() }
+      try ecrire(u.path, s(a, "texte"))
+      return u.path
     case "compact": compact(a["on"] as? Bool ?? false); return true
     case "existe": return !s(a, "chemin").isEmpty && existe(s(a, "chemin"))
     case "bureau": return HOME + "/Desktop"

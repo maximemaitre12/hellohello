@@ -463,6 +463,8 @@ function Default-Config {
     Keep = ""; Exclude = ""; Dedupe = $true
     Speed = "normal"
     Format = "txt"; Folder = [Environment]::GetFolderPath("Desktop"); OpenAtEnd = $false; CopyAtEnd = $false
+    # Le fichier du dernier passage, pour Exporter et Copier au prochain lancement.
+    Dernier = ""
   }
 }
 # Journal du passage en cours : chaque recherche et ce qu'elle a montré. Il
@@ -694,7 +696,7 @@ $SpeedInfo = @{
               <ColumnDefinition Width="*"/><ColumnDefinition Width="10"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="10"/><ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <Button x:Name="BtnRun" Style="{StaticResource Primary}" Content="Lancer le passage"/>
-            <Button x:Name="BtnOpen" Grid.Column="2" Style="{StaticResource Secondary}" Content="Ouvrir le fichier" IsEnabled="False"/>
+            <Button x:Name="BtnExport" Grid.Column="2" Style="{StaticResource Secondary}" Content="Exporter" IsEnabled="False" ToolTip="Enregistrer les adresses dans un fichier texte, une par ligne"/>
             <Button x:Name="BtnCopy" Grid.Column="4" Style="{StaticResource Secondary}" Content="Copier" IsEnabled="False"/>
           </Grid>
 
@@ -780,8 +782,8 @@ $SpeedInfo = @{
                 <TextBlock Style="{StaticResource SectionTitle}" Text="4. Enregistrement"/>
                 <TextBlock Style="{StaticResource Label}" Text="Format du fichier" Margin="0,0,0,8"/>
                 <WrapPanel>
-                  <RadioButton x:Name="FmtTxt" GroupName="fmt" Style="{StaticResource Pill}" Content="Texte"/>
-                  <RadioButton x:Name="FmtCsv" GroupName="fmt" Style="{StaticResource Pill}" Content="CSV pour Excel"/>
+                  <RadioButton x:Name="FmtTxt" GroupName="fmt" Style="{StaticResource Pill}" Content="Texte : adresses seules"/>
+                  <RadioButton x:Name="FmtCsv" GroupName="fmt" Style="{StaticResource Pill}" Content="CSV pour Excel, avec les noms"/>
                   <RadioButton x:Name="FmtBoth" GroupName="fmt" Style="{StaticResource Pill}" Content="Les deux"/>
                 </WrapPanel>
                 <TextBlock Style="{StaticResource Label}" Text="Dossier"/>
@@ -1209,22 +1211,31 @@ $script:stop = $false
 
 $US = [string][char]31; $RS = [string][char]30
 
-function Txt-Line($r) { "$($r.Query) : $($r.Mail)    ($($r.Name))" }
 function Csv-Line($r) { (Csv-Field $r.Query) + ";" + $r.Rank + ";" + (Csv-Field $r.Name) + ";" + (Csv-Field $r.Mail) }
 
-function New-Writer([string]$path) {
-  $w = New-Object System.IO.StreamWriter($path, $false, (New-Object System.Text.UTF8Encoding $true))
+# Le CSV garde un BOM, sans lequel Excel lit mal les accents. Le texte n'en a
+# pas besoin : il ne contient que des adresses.
+function New-Writer([string]$path, [bool]$bom = $true) {
+  $w = New-Object System.IO.StreamWriter($path, $false, (New-Object System.Text.UTF8Encoding $bom))
   $w.AutoFlush = $true
+  $w.NewLine = "`n"
   return $w
+}
+
+# Le texte est le format le plus léger : une adresse par ligne, chacune une
+# seule fois, sans nom ni recherche. Le CSV garde le détail pour qui le veut.
+function Write-Txt([string]$mail) {
+  if ($script:txtW -and $script:txtSeen.Add($mail)) { $script:txtW.WriteLine($mail) }
 }
 
 # Ouvre les fichiers de résultats en y réécrivant ce qui est déjà trouvé (une
 # reprise repart ainsi d'un fichier propre), puis les garde ouverts.
 function Open-Outputs([string]$base, $records) {
   $script:files = @(); $script:txtW = $null; $script:csvW = $null
+  $script:txtSeen = New-Object System.Collections.Generic.HashSet[string]
   if ($cfg.Format -in "txt", "both") {
-    $script:txtW = New-Writer "$base.txt"
-    foreach ($r in $records) { $script:txtW.WriteLine((Txt-Line $r)) }
+    $script:txtW = New-Writer "$base.txt" $false
+    foreach ($r in $records) { Write-Txt $r.Mail }
     $script:files += "$base.txt"
   }
   if ($cfg.Format -in "csv", "both") {
@@ -1236,19 +1247,50 @@ function Open-Outputs([string]$base, $records) {
 }
 
 function Write-Record($r) {
-  if ($script:txtW) { $script:txtW.WriteLine((Txt-Line $r)) }
+  Write-Txt $r.Mail
   if ($script:csvW) { $script:csvW.WriteLine((Csv-Line $r)) }
 }
 
-# Le texte se termine par la liste des adresses distinctes.
 function Close-Outputs {
-  if ($script:txtW) {
-    $script:txtW.WriteLine("")
-    $script:txtW.WriteLine("Adresses distinctes : $($script:distinctes.Count)")
-    foreach ($m in $script:distinctes) { $script:txtW.WriteLine($m) }
-    $script:txtW.Close(); $script:txtW = $null
-  }
+  if ($script:txtW) { $script:txtW.Close(); $script:txtW = $null }
   if ($script:csvW) { $script:csvW.Close(); $script:csvW = $null }
+}
+
+# Les adresses déjà trouvées, pour Exporter et Copier dès l'ouverture : celles
+# du passage interrompu, sinon celles du dernier passage.
+function Load-Known {
+  $j = Read-Journal
+  if ($j -and $j.Entries.Count -gt 0) { return @($j.KeptList | Sort-Object -Unique) }
+  $f = [string]$cfg.Dernier
+  if (-not $f -or -not (Test-Path $f)) { return @() }
+  try {
+    $lines = [System.IO.File]::ReadAllLines($f, [System.Text.Encoding]::UTF8)
+    $mails = if ($f.EndsWith(".csv")) {
+      $lines | Select-Object -Skip 1 | ForEach-Object { ($_ -split ";")[-1].Trim('"') }
+    } else { $lines }
+    return @($mails | Where-Object { $_ -match '^\S+@\S+$' } | ForEach-Object { $_.ToLower() } | Sort-Object -Unique)
+  } catch { return @() }
+}
+
+# Exporter et Copier servent dès qu'il y a des adresses, même avant tout passage.
+function Refresh-Known {
+  $script:distinctes = @(Load-Known)
+  $n = $script:distinctes.Count
+  $ui.BtnExport.IsEnabled = $n -gt 0; $ui.BtnCopy.IsEnabled = $n -gt 0
+  $ui.Distinct.Text = if ($n) { Plural $n "adresse distincte" "adresses distinctes" } else { "" }
+}
+
+function Export-Addresses {
+  if (-not $script:distinctes.Count) { return }
+  $d = New-Object Microsoft.Win32.SaveFileDialog
+  $d.Title = "Exporter les adresses"
+  $d.Filter = "Texte, une adresse par ligne (*.txt)|*.txt"
+  $d.FileName = "adresses-" + (Source-Name).ToLower() + "-" + (Get-Date -Format "yyyy-MM-dd") + ".txt"
+  if (Test-Path $cfg.Folder) { $d.InitialDirectory = $cfg.Folder }
+  if (-not $d.ShowDialog($win)) { return }
+  [System.IO.File]::WriteAllText($d.FileName, (($script:distinctes -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding $false))
+  $ko = [Math]::Max(1, [Math]::Round((Get-Item $d.FileName).Length / 1KB))
+  Notice "$(Plural $script:distinctes.Count "adresse exportée" "adresses exportées") dans $(Split-Path $d.FileName -Leaf) ($ko Ko), une par ligne." "ok"
 }
 
 function Elapsed-Text([double]$sec) {
@@ -1272,7 +1314,7 @@ function Read-Journal {
     if ($lines.Count -lt 1) { return $null }
     $head = $lines[0] | ConvertFrom-Json
     $entries = New-Object System.Collections.Generic.List[object]
-    $kept = @{}
+    $kept = [ordered]@{}
     for ($i = 1; $i -lt $lines.Count; $i++) {
       $tab = $lines[$i].IndexOf("`t")
       if ($tab -lt 0) { continue }
@@ -1284,13 +1326,13 @@ function Read-Journal {
           $f = $item.Split($US)
           if ($f.Count -ne 3) { $ok = $false; break }
           $names += $f[0]; $mails += $f[1]; $keeps += ($f[2] -eq "1")
-          if ($f[2] -eq "1") { $kept[$f[1]] = 1 }
+          if ($f[2] -eq "1") { $kept[$f[1].ToLower()] = 1 }
         }
       }
       if (-not $ok) { break }
       $entries.Add([pscustomobject]@{ Q = $lines[$i].Substring(0, $tab); Names = $names; Mails = $mails; Keep = $keeps })
     }
-    return [pscustomobject]@{ Header = $head; Entries = $entries; Kept = $kept.Count }
+    return [pscustomobject]@{ Header = $head; Entries = $entries; Kept = $kept.Count; KeptList = @($kept.Keys) }
   } catch { return $null }
 }
 
@@ -1309,6 +1351,7 @@ function Refresh-Resume {
     $ui.ResumeBox.Visibility = "Collapsed"
     $ui.BtnRun.Content = if ($script:hasRun) { "Relancer" } else { "Lancer le passage" }
   }
+  Refresh-Known
 }
 
 function Passage([bool]$resume) {
@@ -1489,7 +1532,7 @@ function Passage([bool]$resume) {
 
   $ui.Distinct.Text = Plural $script:distinctes.Count "adresse distincte" "adresses distinctes"
   if ($records.Count -gt 0) {
-    $ui.BtnOpen.IsEnabled = $true; $ui.BtnCopy.IsEnabled = $true
+    $cfg.Dernier = $script:files[0]; Save-Config
     if ($cfg.CopyAtEnd) { [System.Windows.Clipboard]::SetText(($script:distinctes -join [Environment]::NewLine)) }
     if ($cfg.OpenAtEnd) { Open-Files }
   } else {
@@ -1547,13 +1590,13 @@ $ui.BtnFolder.Add_Click({
 })
 $ui.BtnReset.Add_Click({
   $fresh = Default-Config
-  foreach ($k in @($fresh.Keys)) { $cfg[$k] = $fresh[$k] }
+  foreach ($k in @($fresh.Keys)) { if ($k -ne "Dernier") { $cfg[$k] = $fresh[$k] } }
   Apply-Config; Update-Summary
 })
 
 $ui.BtnRun.Add_Click({
   $ui.TabRun.IsChecked = $true
-  $ui.BtnRun.IsEnabled = $false; $ui.BtnOpen.IsEnabled = $false; $ui.BtnCopy.IsEnabled = $false
+  $ui.BtnRun.IsEnabled = $false; $ui.BtnExport.IsEnabled = $false; $ui.BtnCopy.IsEnabled = $false
   $resume = $ui.ResumeBox.Visibility -eq "Visible"
   try { Passage $resume } catch { Compact-Mode $false; Notice "Erreur : $($_.Exception.Message)" "warn" }
   $ui.BtnRun.IsEnabled = $true
@@ -1565,7 +1608,7 @@ $ui.BtnFresh.Add_Click({
   Notice "Le passage interrompu est mis de côté : ses fichiers restent là où ils sont. Lancer le passage repart de A." "info"
 })
 $ui.BtnStop.Add_Click({ $script:stop = $true })
-$ui.BtnOpen.Add_Click({ Open-Files })
+$ui.BtnExport.Add_Click({ Export-Addresses })
 $ui.BtnCopy.Add_Click({
   if ($script:distinctes.Count) {
     [System.Windows.Clipboard]::SetText(($script:distinctes -join [Environment]::NewLine))

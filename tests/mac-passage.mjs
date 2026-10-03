@@ -97,8 +97,14 @@ async function run(c, source, opts = {}) {
   check(bogus.length === 0 && got.size === real.size, `${label} : ${got.size} adresses gardees sur ${real.size} attendues, ${bogus.length} parasite(s)`);
   const txt = Object.entries(written).find(([k]) => k.endsWith(".txt"));
   const csv = Object.entries(written).find(([k]) => k.endsWith(".csv"));
-  check(!!txt && txt[0].startsWith("/Users/test/Desktop/adresses-" + source + "-") && txt[1].includes("Adresses distinctes : " + got.size),
-    `${label} : fichier texte ${txt && txt[0].split("/").pop()}`);
+  // Le texte : rien que les adresses, une par ligne, chacune une fois.
+  const tl = txt ? txt[1].split("\n").filter((l) => l) : [];
+  check(!!txt && txt[0].startsWith("/Users/test/Desktop/adresses-" + source + "-") && tl.length === got.size &&
+    new Set(tl).size === tl.length && tl.every((l) => got.has(l)),
+    `${label} : fichier texte ${txt && txt[0].split("/").pop()}, ${tl.length} adresses seules`);
+  // Au lancement suivant, Exporter et Copier retrouvent le dernier passage.
+  const connues = await m.connues(cfg);
+  check(connues.length === got.size, `${label} : ${connues.length} adresses exportables au lancement suivant`);
   check(!!csv && csv[1].startsWith("﻿Recherche;Rang;Nom;Adresse\r\n"), `${label} : CSV avec en-tete et BOM`);
   check(fin && fin.kind === "ok" && field === "", `${label} : fin "${fin && fin.msg.slice(0, 60)}...", champ A vide`);
   check(keysOutsideField === 0, `${label} : aucune frappe avant que le curseur soit dans A`);

@@ -148,7 +148,7 @@
 
     <div class="row" style="margin-bottom:12px">
       <button class="btn primary" id="btnRun">Lancer le passage</button>
-      <button class="btn" id="btnOpen" disabled>Ouvrir le fichier</button>
+      <button class="btn" id="btnExport" disabled title="Enregistrer les adresses dans un fichier texte, une par ligne">Exporter</button>
       <button class="btn" id="btnCopy" disabled>Copier</button>
     </div>
 
@@ -200,8 +200,8 @@
       <p class="section">4. Enregistrement</p>
       <p class="label">Format du fichier</p>
       <div class="pills" data-group="Format" style="margin-bottom:12px">
-        <button class="pill" data-value="txt">Texte</button>
-        <button class="pill" data-value="csv">CSV pour Excel</button>
+        <button class="pill" data-value="txt">Texte : adresses seules</button>
+        <button class="pill" data-value="csv">CSV pour Excel, avec les noms</button>
         <button class="pill" data-value="both">Les deux</button>
       </div>
       <p class="label">Dossier</p>
@@ -378,8 +378,6 @@ var ui = {
     show("full");
     notice(msg, kind);
     var files = (info && info.files) || [];
-    $("btnOpen").disabled = files.length === 0;
-    $("btnCopy").disabled = !(moteur.distinct && moteur.distinct.length);
     if (info && info.distinct !== undefined) $("distinct").textContent = Moteur.plural(info.distinct, "adresse distincte", "adresses distinctes");
     $("btnRun").disabled = false; $("btnDiag").disabled = false;
     refreshResume();
@@ -390,6 +388,12 @@ var ui = {
 var resumable = false;
 async function refreshResume() {
   var r = moteur ? await moteur.reprise() : null;
+  // Exporter et Copier servent dès qu'il y a des adresses, même avant tout passage.
+  var connues = moteur ? await moteur.connues(cfg) : [];
+  $("btnExport").disabled = connues.length === 0; $("btnCopy").disabled = connues.length === 0;
+  $("distinct").textContent = connues.length ? Moteur.plural(connues.length, "adresse distincte", "adresses distinctes") : "";
+  // Le dernier fichier, retenu par le moteur à la fin du passage, est gardé dans les réglages.
+  if (moteur && !running) natif("sauverReglages", { json: JSON.stringify(cfg) });
   resumable = !!r;
   $("resumeBox").hidden = !r;
   if (r) $("resumeText").textContent = r.text;
@@ -426,7 +430,7 @@ $("btnReset").onclick = function () { cfg = Moteur.defaults(desktop); applyConfi
 async function lancer(fn) {
   if (running) return;
   readConfig();
-  $("btnRun").disabled = true; $("btnOpen").disabled = true; $("btnCopy").disabled = true; $("btnDiag").disabled = true;
+  $("btnRun").disabled = true; $("btnExport").disabled = true; $("btnCopy").disabled = true; $("btnDiag").disabled = true;
   try { await fn(); }
   catch (e) { ui.fin("Erreur : " + (e && e.message ? e.message : e), "warn"); }
 }
@@ -438,7 +442,10 @@ $("btnFresh").onclick = async function () {
 };
 $("btnDiag").onclick = function () { tab("run"); lancer(function () { return moteur.diagnostic(cfg); }); };
 $("btnStop").onclick = function () { moteur.stop = true; $("liveMail").textContent = "Arrêt après cette recherche"; };
-$("btnOpen").onclick = function () { moteur.ouvrirFichiers(); };
+$("btnExport").onclick = async function () {
+  var p = await moteur.exporter(cfg);
+  if (p) notice(Moteur.plural(moteur.distinct.length, "adresse exportée", "adresses exportées") + " dans " + p.split("/").pop() + ", une par ligne.", "ok");
+};
 $("btnCopy").onclick = async function () {
   if (!moteur.distinct.length) return;
   await natif("copier", { texte: moteur.distinct.join("\n") });
