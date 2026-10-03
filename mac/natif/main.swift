@@ -366,7 +366,7 @@ final class Hote: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMes
     if on {
       cadreNormal = fen.frame
       let v = (fen.screen ?? NSScreen.main!).visibleFrame
-      fen.setFrame(NSRect(x: v.maxX - 428, y: v.minY + 8, width: 420, height: 220), display: true, animate: true)
+      fen.setFrame(NSRect(x: v.maxX - 428, y: v.minY + 8, width: 420, height: 196), display: true, animate: true)
       fen.level = .floating
       if activite == nil {
         activite = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled, .latencyCritical], reason: "Passage Adresses Outlook")

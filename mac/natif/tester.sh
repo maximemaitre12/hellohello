@@ -59,6 +59,12 @@ fi
 pkill -f "Adresses Outlook.app" 2>/dev/null || true
 sleep 1
 
+echo "== Fenêtre principale, telle qu'à l'ouverture"
+open -n --env AO_SUPPORT="$T/support" "$APP"
+sleep 10; screencapture -x "$T/1-fenetre.png" || true
+pkill -f "Adresses Outlook.app" 2>/dev/null || true
+sleep 1
+
 ACCES=$(python3 -c "import json;print(json.load(open('$T/app.json')).get('init',{}).get('acces'))" 2>/dev/null || echo False)
 if [ "$ACCES" != "True" ]; then
   echo "== 2. Passage complet : non fait, ce Mac de test n'a pas pu donner l'autorisation Accessibilité."
